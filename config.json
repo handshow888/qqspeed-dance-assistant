@@ -1,0 +1,178 @@
+{
+  "ui_mode": "classic",
+  "ui_profiles": {
+    "classic": {
+      "name": "经典",
+      "templates": {
+        "UP": [
+          "图片素材/经典/上箭头-未按下.png",
+          "图片素材/经典/上箭头-已按下.png"
+        ],
+        "DOWN": [
+          "图片素材/经典/下箭头-未按下.png",
+          "图片素材/经典/下箭头-已按下.png"
+        ],
+        "LEFT": [
+          "图片素材/经典/左箭头-未按下.png",
+          "图片素材/经典/左箭头-已按下.png"
+        ],
+        "RIGHT": [
+          "图片素材/经典/右箭头-未按下.png",
+          "图片素材/经典/右箭头-已按下.png"
+        ]
+      },
+      "recognition": {
+        "match_threshold": 0.35,
+        "scales": [
+          1.0
+        ],
+        "nms_iou_threshold": 0.25,
+        "stable_frames": 2
+      },
+      "space": {
+        "bar_template": "图片素材/经典/节奏条.png",
+        "slider_templates": [
+          "图片素材/经典/节奏条滑块.png"
+        ],
+        "cursor_templates": [
+          "图片素材/经典/节奏条光标.png",
+          "图片素材/经典/节奏条光标2.png",
+          "图片素材/经典/节奏条光标3.png"
+        ],
+        "bar_width_ratio": 0.541,
+        "bar_scale_factors": [
+          1.0
+        ],
+        "bar_match_threshold": 0.5,
+        "slider_match_threshold": 0.62,
+        "cursor_match_threshold": 0.68,
+        "cursor_prior_ratio": 0.75,
+        "cursor_search_radius_ratio": 0.06
+      }
+    },
+    "renewed": {
+      "name": "焕新",
+      "templates": {
+        "UP": [
+          "图片素材/焕新/上箭头-未按下.png",
+          "图片素材/焕新/上箭头-已按下.png"
+        ],
+        "DOWN": [
+          "图片素材/焕新/下箭头-未按下.png",
+          "图片素材/焕新/下箭头-已按下.png"
+        ],
+        "LEFT": [
+          "图片素材/焕新/左箭头-未按下.png",
+          "图片素材/焕新/左箭头-已按下.png"
+        ],
+        "RIGHT": [
+          "图片素材/焕新/右箭头-未按下.png",
+          "图片素材/焕新/右箭头-已按下.png"
+        ]
+      },
+      "recognition": {
+        "match_threshold": 0.42,
+        "scales": [
+          1.0
+        ],
+        "nms_iou_threshold": 0.25,
+        "stable_frames": 2
+      },
+      "space": {
+        "bar_template": "图片素材/焕新/节奏条.png",
+        "slider_templates": [
+          "图片素材/焕新/节奏条滑块.png"
+        ],
+        "cursor_templates": [
+          "图片素材/焕新/节奏条光标.png",
+          "图片素材/焕新/节奏条光标2.png",
+          "图片素材/焕新/节奏条光标3.png"
+        ],
+        "bar_width_ratio": 0.51,
+        "bar_scale_factors": [
+          0.97,
+          1.0,
+          1.03
+        ],
+        "bar_match_threshold": 0.5,
+        "slider_match_threshold": 0.62,
+        "cursor_match_threshold": 0.68,
+        "cursor_prior_ratio": 0.85,
+        "cursor_search_radius_ratio": 0.08
+      }
+    }
+  },
+  "monitor": 1,
+  "arrow_roi": [
+    0.17239583333333333,
+    0.7212962962962963,
+    0.6375,
+    0.22870370370370371
+  ],
+  "window": {
+    "scale": 0.55,
+    "always_on_top": true
+  },
+  "recording": {
+    "fps": 30,
+    "codec": "mp4v",
+    "output_dir": "recordings"
+  },
+  "space": {
+    "enabled": true,
+    "bar_search_roi_in_arrow_roi": [
+      0.08,
+      0.0,
+      0.84,
+      0.45
+    ],
+    "feature_scale_factors": [
+      0.9,
+      1.0,
+      1.1
+    ],
+    "bar_vertical_padding": 0.24,
+    "mean_offset_ms": 0,
+    "stddev_ms": 8,
+    "max_abs_offset_ms": 25,
+    "key_hold_ms": {
+      "min": 25,
+      "max": 45
+    },
+    "prediction_horizon_ms": 180,
+    "prediction_cache_ms": 1800,
+    "minimum_schedule_lead_ms": 8,
+    "late_tolerance_ms": 45,
+    "expire_after_directions_ms": 2200,
+    "min_speed_px_per_second": 120,
+    "max_speed_px_per_second": 900,
+    "minimum_track_samples": 3
+  },
+  "input": {
+    "enabled": true,
+    "auto_elevate": true,
+    "reaction_delay_ms": {
+      "min": 110,
+      "max": 180
+    },
+    "key_hold_ms": {
+      "min": 25,
+      "max": 45
+    },
+    "inter_key_delay_ms": {
+      "min": 35,
+      "max": 75
+    },
+    "clear_frames_to_rearm": 3,
+    "fallback_rearm_ms": 350,
+    "target_window_title_contains": ""
+  },
+  "hotkeys": {
+    "toggle_topmost": "Ctrl+F7",
+    "select_roi": "Ctrl+F8",
+    "start": "Ctrl+F9",
+    "pause_resume": "Ctrl+F10",
+    "stop": "Ctrl+F11",
+    "record_roi": "Ctrl+F12"
+  }
+}

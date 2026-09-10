@@ -1,0 +1,785 @@
+from __future__ import annotations
+
+import logging
+import time
+from collections import deque
+
+import cv2
+import dxcam
+import numpy as np
+
+from .config import PROJECT_ROOT, load_config, resolve_ui_config, save_config
+from .detector import ArrowDetector
+from .hotkeys import GlobalHotkeys
+from .keyboard_input import (
+    DirectionKeySender,
+    InputTiming,
+    SpaceKeySender,
+    foreground_window,
+    is_admin,
+    relaunch_as_admin,
+    window_title,
+)
+from .recorder import RoiVideoRecorder
+from .space_timing import RhythmBarTracker, RhythmObservation, SpaceTimingConfig
+
+
+WINDOW_NAME = "Dance Arrow Recognition - Q to quit"
+LOGGER = logging.getLogger("dance_tool.runtime")
+
+
+def space_expire_reason(
+    armed_at: float | None, now: float, timeout_ms: float
+) -> str | None:
+    """Expire only by time; arrow visibility may flicker while keys change state."""
+    if armed_at is None:
+        return None
+    age_ms = (now - armed_at) * 1000
+    if age_ms >= timeout_ms:
+        return f"timeout {age_ms:.0f}ms"
+    return None
+
+
+def configure_runtime_logging() -> None:
+    log_path = PROJECT_ROOT / "debug" / "runtime.log"
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    handler = logging.FileHandler(log_path, encoding="utf-8")
+    handler.setFormatter(logging.Formatter("%(asctime)s.%(msecs)03d %(levelname)s %(message)s", "%H:%M:%S"))
+    LOGGER.handlers.clear()
+    LOGGER.addHandler(handler)
+    LOGGER.setLevel(logging.INFO)
+    LOGGER.propagate = False
+
+
+class PreviewWindow:
+    def __init__(self, scale: float, always_on_top: bool):
+        self.scale = min(max(float(scale), 0.2), 1.0)
+        self.always_on_top = bool(always_on_top)
+        self._created = False
+        self._source_size: tuple[int, int] | None = None
+
+    def show(self, image: np.ndarray) -> None:
+        source_size = (image.shape[1], image.shape[0])
+        if not self._created:
+            cv2.namedWindow(WINDOW_NAME, cv2.WINDOW_NORMAL | cv2.WINDOW_KEEPRATIO)
+            self._created = True
+
+        cv2.imshow(WINDOW_NAME, image)
+        if self._source_size != source_size:
+            # The recognition image is already scaled before the fixed-size text
+            # header is drawn, so the native window size keeps text readable.
+            cv2.resizeWindow(WINDOW_NAME, source_size[0], source_size[1])
+            self._source_size = source_size
+        self.apply_topmost()
+
+    def toggle_topmost(self) -> bool:
+        self.always_on_top = not self.always_on_top
+        self.apply_topmost()
+        return self.always_on_top
+
+    def apply_topmost(self) -> None:
+        if not self._created:
+            return
+        try:
+            cv2.setWindowProperty(
+                WINDOW_NAME,
+                cv2.WND_PROP_TOPMOST,
+                1.0 if self.always_on_top else 0.0,
+            )
+        except cv2.error:
+            # Some OpenCV Windows builds do not expose the TOPMOST property.
+            pass
+
+
+class ScreenCapture:
+    def __init__(self, monitor_number: int):
+        if monitor_number < 1:
+            raise ValueError("monitor 必须从 1 开始编号")
+        self.camera = dxcam.create(output_idx=monitor_number - 1, output_color="BGR")
+        self.width = int(self.camera.width)
+        self.height = int(self.camera.height)
+        self._last_frame: np.ndarray | None = None
+
+    def close(self) -> None:
+        self.camera.release()
+
+    def grab(self, region: tuple[int, int, int, int] | None = None) -> np.ndarray:
+        frame = self.camera.grab(region=region)
+        if frame is None:
+            for _ in range(5):
+                time.sleep(0.01)
+                frame = self.camera.grab(region=region)
+                if frame is not None:
+                    break
+        if frame is None and self._last_frame is not None:
+            if region is None or self._last_frame.shape[:2] == (
+                region[3] - region[1],
+                region[2] - region[0],
+            ):
+                return self._last_frame.copy()
+        if frame is None:
+            raise RuntimeError("暂时无法取得屏幕画面")
+        self._last_frame = frame.copy()
+        return frame
+
+
+def relative_roi_to_region(
+    screen_width: int, screen_height: int, roi: list[float]
+) -> tuple[int, int, int, int]:
+    x, y, width, height = roi
+    left = max(0, round(screen_width * x))
+    top = max(0, round(screen_height * y))
+    right = min(screen_width, left + max(1, round(screen_width * width)))
+    bottom = min(screen_height, top + max(1, round(screen_height * height)))
+    return left, top, right, bottom
+
+
+def select_arrow_roi(capture: ScreenCapture, config: dict) -> bool:
+    screenshot = capture.grab()
+    title = "Select arrow area, then press ENTER (ESC cancels)"
+    x, y, width, height = (
+        int(value) for value in cv2.selectROI(title, screenshot, False, False)
+    )
+    cv2.destroyWindow(title)
+    if width <= 0 or height <= 0:
+        print("已取消区域标定")
+        return False
+
+    config["arrow_roi"] = [
+        x / capture.width,
+        y / capture.height,
+        width / capture.width,
+        height / capture.height,
+    ]
+    save_config(config)
+    print(f"箭头区域已保存：x={x}, y={y}, width={width}, height={height}")
+    return True
+
+
+def calibrate_arrow_roi() -> int:
+    config = load_config()
+    capture = ScreenCapture(int(config.get("monitor", 1)))
+    try:
+        return 0 if select_arrow_roi(capture, config) else 1
+    finally:
+        capture.close()
+
+
+def draw_status(
+    frame: np.ndarray,
+    state: str,
+    fps: float,
+    stable_count: int,
+    stable_required: int,
+    stable_sequence: tuple[str, ...],
+    always_on_top: bool,
+    input_status: str,
+    message: str | None,
+    recording_status: str | None = None,
+    display_scale: float = 1.0,
+    space_status: str = "OFF",
+    ui_mode: str = "",
+) -> np.ndarray:
+    scale = min(max(float(display_scale), 0.2), 1.0)
+    display_width = max(1, round(frame.shape[1] * scale))
+    display_height = max(1, round(frame.shape[0] * scale))
+    interpolation = cv2.INTER_AREA if scale < 1.0 else cv2.INTER_LINEAR
+    scaled_frame = cv2.resize(frame, (display_width, display_height), interpolation=interpolation)
+
+    # This header is added after image scaling, so its text remains at a fixed,
+    # readable pixel size even when the recognition image is displayed at 55%.
+    header_height = 138
+    canvas = np.zeros(
+        (scaled_frame.shape[0] + header_height, scaled_frame.shape[1], 3),
+        dtype=np.uint8,
+    )
+    canvas[header_height:] = scaled_frame
+    color = {"RUNNING": (60, 230, 80), "PAUSED": (30, 210, 255), "STOPPED": (80, 80, 240)}[state]
+    topmost_text = "ON" if always_on_top else "OFF"
+    cv2.putText(
+        canvas,
+        f"{state}   MODE: {ui_mode.upper() or '-'}   FPS: {fps:.1f}   "
+        f"TOPMOST: {topmost_text}   INPUT: {input_status}",
+        (12, 25),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        0.62,
+        color,
+        2,
+    )
+    cv2.putText(
+        canvas,
+        "Ctrl+F7 Top | F8 ROI | F9 Start | F10 Pause | F11 Stop",
+        (12, 52),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        0.52,
+        (240, 240, 240),
+        2,
+        cv2.LINE_AA,
+    )
+    short_direction = {"UP": "U", "DOWN": "D", "LEFT": "L", "RIGHT": "R"}
+    sequence_text = " ".join(short_direction[item] for item in stable_sequence) if stable_sequence else "-"
+    cv2.putText(
+        canvas,
+        f"Stable: {stable_count}/{stable_required}   Sequence: {sequence_text}",
+        (12, 80),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        0.58,
+        (240, 240, 240),
+        2,
+        cv2.LINE_AA,
+    )
+    cv2.putText(
+        canvas,
+        f"Space: {space_status}",
+        (12, 106),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        0.54,
+        (255, 220, 80),
+        2,
+        cv2.LINE_AA,
+    )
+    footer = recording_status or message or "Ctrl+F12 Start/Stop ROI recording"
+    if footer:
+        cv2.putText(
+            canvas,
+            footer[:80],
+            (12, 130),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.46,
+            (80, 180, 255),
+            1,
+            cv2.LINE_AA,
+        )
+    return canvas
+
+
+def run_live(ui_mode: str | None = None) -> int:
+    configure_runtime_logging()
+    saved_config = load_config()
+    config = resolve_ui_config(saved_config, ui_mode)
+    print(f"当前 UI 模式：{config.get('name', config['ui_mode'])} ({config['ui_mode']})")
+    input_config = config["input"]
+    input_enabled = bool(input_config.get("enabled", True))
+    if input_enabled and bool(input_config.get("auto_elevate", True)) and not is_admin():
+        LOGGER.warning("elevation_required; requesting UAC relaunch")
+        print("游戏以管理员权限运行，正在请求 UAC 权限并重新启动 Demo……")
+        if relaunch_as_admin(str(PROJECT_ROOT)):
+            return 0
+        LOGGER.error("elevation_request_failed_or_cancelled")
+        print("未获得管理员权限，方向键输入仍可能被游戏忽略。")
+
+    if not saved_config.get("arrow_roi"):
+        print("尚未标定箭头区域，正在打开区域选择窗口……")
+        if calibrate_arrow_roi() != 0:
+            return 1
+        saved_config = load_config()
+        config = resolve_ui_config(saved_config, ui_mode)
+
+    detector = ArrowDetector(config)
+    stable_required = int(config["recognition"]["stable_frames"])
+    input_timing = InputTiming.from_config(input_config)
+    key_sender = DirectionKeySender(input_timing)
+    space_timing = SpaceTimingConfig.from_config(config.get("space", {}))
+    space_tracker = RhythmBarTracker(space_timing)
+    space_sender = SpaceKeySender(
+        space_timing.key_hold_min_ms,
+        space_timing.key_hold_max_ms,
+    )
+    recorder = RoiVideoRecorder(config.get("recording", {}))
+    LOGGER.info(
+        "live_start ui_mode=%s admin=%s input_enabled=%s reaction=%d-%d hold=%d-%d interval=%d-%d",
+        config["ui_mode"],
+        is_admin(),
+        input_enabled,
+        input_timing.reaction_min_ms,
+        input_timing.reaction_max_ms,
+        input_timing.key_hold_min_ms,
+        input_timing.key_hold_max_ms,
+        input_timing.inter_key_min_ms,
+        input_timing.inter_key_max_ms,
+    )
+    window_config = config.setdefault("window", {"scale": 0.55, "always_on_top": False})
+    preview = PreviewWindow(
+        scale=float(window_config.get("scale", 0.55)),
+        always_on_top=bool(window_config.get("always_on_top", False)),
+    )
+    hotkeys = GlobalHotkeys(config["hotkeys"])
+    hotkeys.start()
+
+    state = "STOPPED"
+    history: deque[tuple[str, ...]] = deque(maxlen=stable_required)
+    stable_sequence: tuple[str, ...] = ()
+    last_frame: np.ndarray | None = None
+    status_message: str | None = None
+    frame_times: deque[float] = deque(maxlen=30)
+    target_hwnd = 0
+    target_title = ""
+    round_armed = True
+    first_seen_at: float | None = None
+    reaction_delay_seconds: float | None = None
+    clear_frames = 0
+    transition_seen = False
+    last_sent_sequence: tuple[str, ...] = ()
+    last_input_completed_at: float | None = None
+    last_observed_sequence: tuple[str, ...] = ()
+    input_status = "DISABLED" if not input_enabled else "READY"
+    record_requested = False
+    space_armed = False
+    space_scheduled = False
+    space_tracking_active = False
+    space_offset_ms: float | None = None
+    space_armed_at: float | None = None
+    space_status = "OFF" if not space_timing.enabled else "WAIT DIRECTIONS"
+
+    def reset_round() -> None:
+        nonlocal round_armed, first_seen_at, reaction_delay_seconds
+        nonlocal clear_frames, transition_seen, input_status
+        round_armed = True
+        first_seen_at = None
+        reaction_delay_seconds = None
+        clear_frames = 0
+        transition_seen = False
+        input_status = "DISABLED" if not input_enabled else "READY"
+
+    def cancel_space_cycle(*, clear_target: bool = False) -> None:
+        nonlocal space_armed, space_scheduled, space_tracking_active
+        nonlocal space_offset_ms, space_status
+        nonlocal space_armed_at
+        space_sender.cancel()
+        space_tracker.reset(keep_target=not clear_target)
+        space_armed = False
+        space_scheduled = False
+        space_tracking_active = False
+        space_offset_ms = None
+        space_armed_at = None
+        space_status = "OFF" if not space_timing.enabled else "WAIT DIRECTIONS"
+
+    def bind_foreground_target() -> bool:
+        nonlocal target_hwnd, target_title, status_message
+        hwnd = foreground_window()
+        title = window_title(hwnd)
+        required_title = str(input_config.get("target_window_title_contains", "")).strip()
+        if hwnd == 0 or title == WINDOW_NAME:
+            status_message = "Focus game window, then press Ctrl+F9"
+            LOGGER.warning("target_bind_rejected hwnd=%s title=%r", hwnd, title)
+            return False
+        if required_title and required_title.casefold() not in title.casefold():
+            status_message = "Foreground window does not match configured target"
+            print(f"前台窗口不匹配：实际={title!r}，要求包含={required_title!r}")
+            LOGGER.warning(
+                "target_title_mismatch hwnd=%s actual=%r required=%r",
+                hwnd,
+                title,
+                required_title,
+            )
+            return False
+        target_hwnd = hwnd
+        target_title = title
+        status_message = "Target window bound"
+        print(f"已绑定目标窗口：{target_title!r}")
+        LOGGER.info("target_bound hwnd=%s title=%r", target_hwnd, target_title)
+        return True
+
+    capture = ScreenCapture(int(config.get("monitor", 1)))
+    region = relative_roi_to_region(capture.width, capture.height, config["arrow_roi"])
+    try:
+        while True:
+            for event, message in hotkeys.poll():
+                if event == "toggle_topmost":
+                    enabled = preview.toggle_topmost()
+                    saved_config.setdefault("window", {})["always_on_top"] = enabled
+                    save_config(saved_config)
+                    status_message = f"TOPMOST {'ON' if enabled else 'OFF'}"
+                elif event == "select_roi":
+                    previous_state = state
+                    state = "PAUSED"
+                    key_sender.cancel()
+                    cancel_space_cycle(clear_target=True)
+                    if recorder.active:
+                        saved_path = recorder.stop()
+                        status_message = f"Recording stopped: {saved_path.name}"
+                        LOGGER.warning("recording_stopped_for_roi_change path=%s", saved_path)
+                    if select_arrow_roi(capture, saved_config):
+                        config["arrow_roi"] = saved_config["arrow_roi"]
+                        region = relative_roi_to_region(
+                            capture.width, capture.height, saved_config["arrow_roi"]
+                        )
+                        history.clear()
+                        stable_sequence = ()
+                        last_observed_sequence = ()
+                        last_frame = None
+                    if previous_state == "RUNNING":
+                        target_hwnd = 0
+                        reset_round()
+                        status_message = "ROI updated; focus game and press Ctrl+F9"
+                    state = "STOPPED" if previous_state == "STOPPED" else "PAUSED"
+                elif event == "start":
+                    key_sender.cancel()
+                    cancel_space_cycle(clear_target=True)
+                    if bind_foreground_target():
+                        state = "RUNNING"
+                        history.clear()
+                        stable_sequence = ()
+                        last_observed_sequence = ()
+                        reset_round()
+                elif event == "pause_resume":
+                    if state == "RUNNING":
+                        state = "PAUSED"
+                        key_sender.cancel()
+                        cancel_space_cycle()
+                        history.clear()
+                        stable_sequence = ()
+                        last_observed_sequence = ()
+                        reset_round()
+                    elif state == "PAUSED":
+                        if target_hwnd and foreground_window() == target_hwnd:
+                            state = "RUNNING"
+                            history.clear()
+                            stable_sequence = ()
+                            last_observed_sequence = ()
+                            reset_round()
+                        else:
+                            status_message = "Target not focused; focus game and press Ctrl+F9"
+                elif event == "stop":
+                    state = "STOPPED"
+                    key_sender.cancel()
+                    cancel_space_cycle()
+                    history.clear()
+                    stable_sequence = ()
+                    last_observed_sequence = ()
+                    target_hwnd = 0
+                    target_title = ""
+                    reset_round()
+                elif event == "record_roi":
+                    if recorder.active:
+                        saved_path = recorder.stop()
+                        status_message = f"Recording saved: {saved_path.name}"
+                        LOGGER.info("recording_stopped_by_hotkey path=%s", saved_path)
+                    elif record_requested:
+                        status_message = "ROI recording is starting"
+                    else:
+                        record_requested = True
+                        status_message = "Starting ROI recording..."
+                elif event == "error":
+                    status_message = message
+
+            for event, payload in key_sender.poll():
+                if event == "started":
+                    input_status = "SENDING"
+                    actual_ms = payload.get("actual_reaction_ms")
+                    print(
+                        f"开始输入：{' '.join(payload['sequence'])}；"
+                        f"实际首键等待={actual_ms}ms"
+                    )
+                    LOGGER.info(
+                        "input_started sequence=%r actual_reaction_ms=%s target_hwnd=%s",
+                        payload["sequence"],
+                        actual_ms,
+                        target_hwnd,
+                    )
+                elif event == "completed":
+                    input_status = "SENT"
+                    last_input_completed_at = time.perf_counter()
+                    print(f"方向键输入完成：{payload}")
+                    LOGGER.info("input_completed payload=%r", payload)
+                    if (
+                        space_timing.enabled
+                        and space_tracking_active
+                        and state == "RUNNING"
+                        and target_hwnd
+                    ):
+                        space_armed = True
+                        space_offset_ms = space_timing.sample_offset_ms()
+                        space_armed_at = time.perf_counter()
+                        space_status = f"TRACKING offset={space_offset_ms:+.1f}ms"
+                        LOGGER.info("space_armed offset_ms=%.1f", space_offset_ms)
+                elif event == "cancelled":
+                    input_status = "CANCELLED"
+                    LOGGER.warning("input_cancelled sequence=%r", payload)
+                elif event == "error":
+                    input_status = "ERROR"
+                    status_message = str(payload)
+                    LOGGER.error("input_error detail=%s", payload)
+
+            for event, payload in space_sender.poll():
+                if event == "completed":
+                    space_status = (
+                        f"PRESSED error={payload['predicted_crossing_error_ms']:+.1f}ms"
+                    )
+                    print(f"空格输入完成：{payload}")
+                    LOGGER.info("space_completed payload=%r", payload)
+                elif event == "cancelled":
+                    LOGGER.warning("space_cancelled")
+                elif event == "error":
+                    space_status = "ERROR"
+                    status_message = str(payload)
+                    LOGGER.error("space_error detail=%s", payload)
+
+            started = time.perf_counter()
+            if state == "RUNNING" or recorder.active or record_requested or last_frame is None:
+                frame = capture.grab(region)
+                last_frame = frame
+            else:
+                frame = last_frame.copy()
+
+            if record_requested:
+                try:
+                    recording_path = recorder.start(frame)
+                    LOGGER.info(
+                        "recording_started path=%s fps=%.1f size=%sx%s",
+                        recording_path,
+                        recorder.fps,
+                        frame.shape[1],
+                        frame.shape[0],
+                    )
+                    status_message = f"Recording: {recording_path.name}"
+                except Exception as error:
+                    status_message = f"Recording failed: {error}"
+                    LOGGER.exception("recording_start_failed")
+                finally:
+                    record_requested = False
+
+            if recorder.active:
+                try:
+                    recorder.add_frame(frame)
+                except Exception as error:
+                    recorder.stop()
+                    status_message = f"Recording failed: {error}"
+                    LOGGER.exception("recording_write_failed")
+
+            captured_at = time.perf_counter()
+            detections = detector.detect(frame) if state == "RUNNING" else []
+            sequence = tuple(item.direction for item in detections)
+            space_observation: RhythmObservation | None = None
+            if state == "RUNNING" and space_timing.enabled and space_tracking_active:
+                space_observation = space_tracker.observe(frame, captured_at)
+                crossing_at = space_observation.crossing_at
+                if (
+                    space_armed
+                    and not space_scheduled
+                    and crossing_at is not None
+                    and space_offset_ms is not None
+                ):
+                    desired_press_at = crossing_at + space_offset_ms / 1000.0
+                    lead_ms = (desired_press_at - captured_at) * 1000
+                    if lead_ms < -space_timing.late_tolerance_ms:
+                        space_armed = False
+                        space_tracking_active = False
+                        space_status = f"MISSED {lead_ms:+.0f}ms"
+                        LOGGER.warning(
+                            "space_prediction_missed lead_ms=%.1f marker=%s target=%s speed=%s cached=%s",
+                            lead_ms,
+                            space_observation.marker_x,
+                            space_observation.target_x,
+                            space_observation.speed_px_per_second,
+                            space_observation.prediction_cached,
+                        )
+                    elif lead_ms <= space_timing.prediction_horizon_ms:
+                        press_at = max(
+                            captured_at + space_timing.minimum_schedule_lead_ms / 1000.0,
+                            desired_press_at,
+                        )
+                        if space_sender.start_at(
+                            press_at,
+                            target_hwnd,
+                            predicted_crossing_at=crossing_at,
+                            sampled_offset_ms=space_offset_ms,
+                        ):
+                            space_armed = False
+                            space_scheduled = True
+                            space_tracking_active = False
+                            space_armed_at = None
+                            space_status = f"SCHEDULED {lead_ms:+.0f}ms"
+                            LOGGER.info(
+                                "space_scheduled lead_ms=%.1f offset_ms=%.1f marker=%s target=%s speed=%s cached=%s",
+                                lead_ms,
+                                space_offset_ms,
+                                space_observation.marker_x,
+                                space_observation.target_x,
+                                space_observation.speed_px_per_second,
+                                space_observation.prediction_cached,
+                            )
+                elif space_armed:
+                    if space_observation.bar_rect == (0, 0, 0, 0):
+                        space_status = "LOCATING BAR"
+                    elif space_observation.target_x is None:
+                        space_status = "LOCATING CURSOR"
+                    elif space_observation.marker_x is None:
+                        space_status = (
+                            "TRACKING (cached)"
+                            if space_observation.prediction_cached
+                            else "WAIT SLIDER"
+                        )
+                    else:
+                        space_status = "TRACKING"
+
+                if space_armed:
+                    expire_reason = space_expire_reason(
+                        space_armed_at,
+                        captured_at,
+                        space_timing.expire_after_directions_ms,
+                    )
+                    if expire_reason is not None:
+                        space_armed = False
+                        space_tracking_active = False
+                        space_offset_ms = None
+                        space_status = "EXPIRED"
+                        LOGGER.warning(
+                            "space_round_expired reason=%s bar_score=%s "
+                            "slider_score=%s cursor_score=%s marker=%s "
+                            "target=%s speed=%s crossing=%s cached=%s",
+                            expire_reason,
+                            space_observation.bar_match_score,
+                            space_observation.slider_match_score,
+                            space_observation.cursor_match_score,
+                            space_observation.marker_x,
+                            space_observation.target_x,
+                            space_observation.speed_px_per_second,
+                            space_observation.crossing_at,
+                            space_observation.prediction_cached,
+                        )
+                        space_tracker.reset(keep_target=True)
+
+            if state == "RUNNING":
+                if sequence != last_observed_sequence:
+                    LOGGER.info(
+                        "sequence_observed sequence=%r scores=%r appearance=%r",
+                        sequence,
+                        [round(item.score, 3) for item in detections],
+                        [item.appearance for item in detections],
+                    )
+                    last_observed_sequence = sequence
+                history.append(sequence)
+                if len(history) == stable_required and len(set(history)) == 1 and sequence:
+                    stable_sequence = sequence
+                else:
+                    stable_sequence = ()
+
+                now = time.perf_counter()
+                all_unpressed = bool(detections) and all(
+                    item.appearance == "unpressed" for item in detections
+                )
+                any_pressed = any(item.appearance == "pressed" for item in detections)
+
+                if not round_armed:
+                    if not sequence or any_pressed:
+                        transition_seen = True
+                    fallback_ready = (
+                        last_input_completed_at is not None
+                        and (now - last_input_completed_at) * 1000
+                        >= input_timing.fallback_rearm_ms
+                        and bool(last_sent_sequence)
+                        and stable_sequence != last_sent_sequence
+                    )
+                    if (
+                        (transition_seen or fallback_ready)
+                        and all_unpressed
+                        and stable_sequence
+                        and not key_sender.busy
+                    ):
+                        LOGGER.info(
+                            "next_group_detected_without_blank sequence=%r transition_seen=%s fallback=%s",
+                            stable_sequence,
+                            transition_seen,
+                            fallback_ready,
+                        )
+                        reset_round()
+
+                if sequence:
+                    clear_frames = 0
+                    if round_armed and first_seen_at is None:
+                        first_seen_at = now
+                        reaction_delay_seconds = input_timing.random_reaction_seconds()
+                        input_status = f"WAIT {round(reaction_delay_seconds * 1000)}ms"
+                        LOGGER.info(
+                            "sequence_first_seen sequence=%r reaction_ms=%d",
+                            sequence,
+                            round(reaction_delay_seconds * 1000),
+                        )
+                else:
+                    clear_frames += 1
+                    if clear_frames >= input_timing.clear_frames_to_rearm:
+                        if not key_sender.busy:
+                            reset_round()
+
+                if (
+                    input_enabled
+                    and round_armed
+                    and stable_sequence
+                    and first_seen_at is not None
+                    and reaction_delay_seconds is not None
+                ):
+                    remaining = first_seen_at + reaction_delay_seconds - now
+                    input_status = f"WAIT {max(0, round(remaining * 1000))}ms"
+                    if key_sender.start(
+                        stable_sequence,
+                        target_hwnd,
+                        delay_seconds=max(0.0, remaining),
+                        first_seen_at=first_seen_at,
+                    ):
+                        round_armed = False
+                        cancel_space_cycle()
+                        space_tracking_active = space_timing.enabled
+                        space_status = (
+                            "TRACKING BAR"
+                            if space_tracking_active
+                            else "OFF"
+                        )
+                        if space_tracking_active:
+                            LOGGER.info(
+                                "space_tracking_started sequence=%r",
+                                stable_sequence,
+                            )
+                        last_sent_sequence = stable_sequence
+                        LOGGER.info(
+                            "input_scheduled sequence=%r reaction_ms=%d remaining_ms=%d target_hwnd=%s",
+                            stable_sequence,
+                            round(reaction_delay_seconds * 1000),
+                            max(0, round(remaining * 1000)),
+                            target_hwnd,
+                        )
+                annotated = detector.annotate(frame, detections)
+                if space_observation is not None:
+                    annotated = space_tracker.annotate(annotated, space_observation)
+            else:
+                annotated = frame.copy()
+
+            elapsed = max(time.perf_counter() - started, 1e-6)
+            frame_times.append(elapsed)
+            fps = len(frame_times) / max(sum(frame_times), 1e-6)
+            stable_count = sum(1 for item in history if item == (history[-1] if history else ()))
+            recording_status = None
+            if recorder.active:
+                recording_status = f"REC {recorder.elapsed_seconds():.1f}s -> {recorder.output_path.name}"
+            display = draw_status(
+                annotated,
+                state,
+                fps,
+                stable_count,
+                stable_required,
+                stable_sequence,
+                preview.always_on_top,
+                input_status,
+                status_message,
+                recording_status,
+                preview.scale,
+                space_status,
+                config["ui_mode"],
+            )
+            preview.show(display)
+            key = cv2.waitKey(1) & 0xFF
+            if key in (ord("q"), 27):
+                break
+            if cv2.getWindowProperty(WINDOW_NAME, cv2.WND_PROP_VISIBLE) < 1:
+                break
+    finally:
+        LOGGER.info("live_stop")
+        incomplete_recording = recorder.stop()
+        if incomplete_recording is not None:
+            LOGGER.info("recording_stopped_on_exit path=%s", incomplete_recording)
+        key_sender.close()
+        space_sender.close()
+        capture.close()
+        hotkeys.close()
+        cv2.destroyAllWindows()
+    return 0
