@@ -337,17 +337,26 @@ def run_live(
     yolo_detector: YoloArrowDetector | None = None
     yolo_enabled = bool(config.get("yolo", {}).get("enabled", False))
     yolo_startup_error: str | None = None
-    if yolo_enabled:
-        try:
-            yolo_detector = YoloArrowDetector(config.get("yolo", {}))
-        except (OSError, RuntimeError, ValueError) as error:
+    yolo_preload_started = time.perf_counter()
+    try:
+        yolo_detector = YoloArrowDetector(config.get("yolo", {}))
+        yolo_detector.warmup()
+    except Exception as error:
+        yolo_detector = None
+        if yolo_enabled:
             yolo_enabled = False
             saved_config.setdefault("yolo", {})["enabled"] = False
             config.setdefault("yolo", {})["enabled"] = False
             save_config(saved_config)
-            yolo_startup_error = f"YOLO disabled: {error}"
-            LOGGER.exception("yolo_startup_failed")
-        else:
+        yolo_startup_error = f"YOLO preload failed; using OpenCV: {error}"
+        LOGGER.exception("yolo_preload_failed")
+    else:
+        LOGGER.info(
+            "yolo_preloaded model=%s elapsed_ms=%d",
+            yolo_detector.model_path,
+            round((time.perf_counter() - yolo_preload_started) * 1000),
+        )
+        if yolo_enabled:
             detector = yolo_detector
     recorder = RoiVideoRecorder(config.get("recording", {}))
     dataset_collector = YoloDatasetCollector(config.get("dataset", {}))
@@ -508,26 +517,28 @@ def run_live(
                     yolo_settings["enabled"] = enable_yolo
                     config.setdefault("yolo", {})["enabled"] = enable_yolo
                     if enable_yolo:
-                        try:
-                            yolo_detector = YoloArrowDetector(yolo_settings)
-                        except (OSError, RuntimeError, ValueError) as error:
-                            yolo_enabled = False
-                            yolo_settings["enabled"] = False
-                            config["yolo"]["enabled"] = False
-                            detector = opencv_detector
-                            status_message = f"YOLO enable failed: {error}"
-                            LOGGER.exception("yolo_enable_failed")
-                        else:
+                        if yolo_detector is None:
+                            try:
+                                yolo_detector = YoloArrowDetector(yolo_settings)
+                                yolo_detector.warmup()
+                            except Exception as error:
+                                yolo_detector = None
+                                yolo_enabled = False
+                                yolo_settings["enabled"] = False
+                                config["yolo"]["enabled"] = False
+                                detector = opencv_detector
+                                status_message = f"YOLO enable failed: {error}"
+                                LOGGER.exception("yolo_enable_failed")
+                        if yolo_detector is not None:
                             yolo_enabled = True
                             detector = yolo_detector
-                            status_message = "Arrow detector: YOLO"
+                            status_message = "Arrow detector: YOLO (preloaded)"
                             LOGGER.info(
                                 "arrow_detector_switched backend=yolo model=%s",
                                 yolo_detector.model_path,
                             )
                     else:
                         yolo_enabled = False
-                        yolo_detector = None
                         detector = opencv_detector
                         status_message = "Arrow detector: OpenCV"
                         LOGGER.info("arrow_detector_switched backend=opencv")

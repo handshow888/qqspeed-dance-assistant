@@ -104,6 +104,13 @@ class YoloArrowDetector:
                 "YOLO 权重类别不匹配，期望：" + ", ".join(CLASS_NAMES)
             )
 
+    def warmup(self) -> None:
+        """Move the model to its inference device before the UI becomes interactive."""
+        # The live arrow ROI is very wide. This aspect ratio produces the same
+        # 160x640 tensor shape used by the current 1224x247 captures.
+        dummy = np.zeros((320, 1280, 3), dtype=np.uint8)
+        self.detect(dummy)
+
     def detect(self, image: np.ndarray, keep_main_row: bool = True) -> list[Detection]:
         results = self.model.predict(
             source=image,

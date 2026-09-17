@@ -183,7 +183,7 @@ runs/yolo_arrow/yolo26n_arrows/weights/best.pt
 runs/yolo_arrow/yolo26n_arrows/weights/best.pt
 ```
 
-第一次点击开启时会加载模型，可能短暂停顿。开关状态会保存到 `config.json` 的 `yolo.enabled`；如果模型缺失、CUDA 不可用或推理异常，程序会关闭 YOLO 并自动回退到 OpenCV。
+程序启动时会预先加载模型并执行一次 CUDA 预热，因此观察窗口第一次出现可能会比以前慢几秒；窗口出现后再开启 YOLO 或第一次正式识别时不需要重新加载。关闭 YOLO 后模型仍保留在内存中，再次开启可直接复用。开关状态会保存到 `config.json` 的 `yolo.enabled`；如果模型缺失、CUDA 不可用或推理异常，程序会关闭 YOLO 并自动回退到 OpenCV。
 
 如需调整，可使用例如：
 
