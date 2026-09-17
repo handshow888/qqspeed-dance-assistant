@@ -14,15 +14,8 @@
     "stable_frames": 2
   },
   "space": {
-    "bar_template": "assets/traditional_four_key/renewed/templates/节奏条.png",
     "slider_templates": ["assets/traditional_four_key/renewed/templates/节奏条滑块.png"],
-    "cursor_templates": ["assets/traditional_four_key/renewed/templates/节奏条光标.png", "assets/traditional_four_key/renewed/templates/节奏条光标2.png", "assets/traditional_four_key/renewed/templates/节奏条光标3.png"],
-    "bar_width_ratio": 0.51,
-    "bar_scale_factors": [0.97, 1.0, 1.03],
-    "bar_match_threshold": 0.5,
     "slider_match_threshold": 0.62,
-    "cursor_match_threshold": 0.68,
-    "cursor_prior_ratio": 0.85,
-    "cursor_search_radius_ratio": 0.08
+    "cursor_window_ratio": 0.603646
   }
 }

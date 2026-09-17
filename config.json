@@ -3,11 +3,15 @@
   "ui_mode": "classic",
   "monitor": 1,
   "arrow_roi": [
-    0.17239583333333333,
-    0.7212962962962963,
-    0.6375,
-    0.22870370370370371
+    0.0,
+    0.7203703703703703,
+    1.0,
+    0.20925925925925926
   ],
+  "auto_roi": {
+    "top_ratio": 0.72,
+    "bottom_ratio": 0.93
+  },
   "window": {
     "scale": 0.55,
     "always_on_top": true,
@@ -26,10 +30,10 @@
   },
   "space": {
     "enabled": true,
-    "bar_search_roi_in_arrow_roi": [
-      0.08,
+    "slider_search_roi_in_arrow_roi": [
       0.0,
-      0.84,
+      0.0,
+      1.0,
       0.45
     ],
     "feature_scale_factors": [
@@ -37,7 +41,7 @@
       1.0,
       1.1
     ],
-    "bar_vertical_padding": 0.24,
+    "cursor_window_ratio": 0.6,
     "mean_offset_ms": 0,
     "stddev_ms": 8,
     "max_abs_offset_ms": 25,
@@ -75,9 +79,8 @@
   },
   "hotkeys": {
     "toggle_topmost": "Ctrl+F7",
-    "select_roi": "Ctrl+F8",
-    "start": "Ctrl+F9",
-    "pause_resume": "Ctrl+F10",
+    "select_roi": "Ctrl+F9",
+    "start": "Ctrl+F10",
     "stop": "Ctrl+F11",
     "record_roi": "Ctrl+F12",
     "capture_rhythm_dataset": "Ctrl+="
@@ -86,7 +89,6 @@
     "enabled": true,
     "model": "runs/yolo_arrow/yolo26n_rhythm_10class-2/weights/best.pt",
     "confidence": 0.5,
-    "rhythm_bar_confidence": 0.4,
     "slider_confidence": 0.3,
     "iou": 0.45,
     "image_size": 640,

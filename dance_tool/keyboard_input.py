@@ -70,6 +70,15 @@ class INPUT(ctypes.Structure):
     _fields_ = (("type", wintypes.DWORD), ("union", INPUT_UNION))
 
 
+class MONITORINFO(ctypes.Structure):
+    _fields_ = (
+        ("cbSize", wintypes.DWORD),
+        ("rcMonitor", wintypes.RECT),
+        ("rcWork", wintypes.RECT),
+        ("dwFlags", wintypes.DWORD),
+    )
+
+
 USER32 = ctypes.windll.user32
 USER32.SendInput.argtypes = (wintypes.UINT, ctypes.POINTER(INPUT), ctypes.c_int)
 USER32.SendInput.restype = wintypes.UINT
@@ -80,6 +89,14 @@ USER32.GetWindowTextW.argtypes = (wintypes.HWND, wintypes.LPWSTR, ctypes.c_int)
 USER32.GetWindowTextW.restype = ctypes.c_int
 USER32.GetAsyncKeyState.argtypes = (ctypes.c_int,)
 USER32.GetAsyncKeyState.restype = wintypes.SHORT
+USER32.GetClientRect.argtypes = (wintypes.HWND, ctypes.POINTER(wintypes.RECT))
+USER32.GetClientRect.restype = wintypes.BOOL
+USER32.ClientToScreen.argtypes = (wintypes.HWND, ctypes.POINTER(wintypes.POINT))
+USER32.ClientToScreen.restype = wintypes.BOOL
+USER32.MonitorFromWindow.argtypes = (wintypes.HWND, wintypes.DWORD)
+USER32.MonitorFromWindow.restype = wintypes.HANDLE
+USER32.GetMonitorInfoW.argtypes = (wintypes.HANDLE, ctypes.POINTER(MONITORINFO))
+USER32.GetMonitorInfoW.restype = wintypes.BOOL
 
 MODIFIER_KEYS = (0x10, 0x11, 0x12, 0x5B, 0x5C)  # Shift, Ctrl, Alt, left/right Win
 
@@ -111,6 +128,32 @@ def window_title(hwnd: int) -> str:
     buffer = ctypes.create_unicode_buffer(length + 1)
     USER32.GetWindowTextW(hwnd, buffer, len(buffer))
     return buffer.value
+
+
+def window_client_rect(hwnd: int) -> tuple[int, int, int, int]:
+    """Return the window client area in virtual-screen coordinates."""
+    rect = wintypes.RECT()
+    if hwnd == 0 or not USER32.GetClientRect(hwnd, ctypes.byref(rect)):
+        raise ctypes.WinError()
+    top_left = wintypes.POINT(rect.left, rect.top)
+    bottom_right = wintypes.POINT(rect.right, rect.bottom)
+    if not USER32.ClientToScreen(hwnd, ctypes.byref(top_left)):
+        raise ctypes.WinError()
+    if not USER32.ClientToScreen(hwnd, ctypes.byref(bottom_right)):
+        raise ctypes.WinError()
+    return top_left.x, top_left.y, bottom_right.x, bottom_right.y
+
+
+def window_monitor_rect(hwnd: int) -> tuple[int, int, int, int]:
+    """Return the monitor containing the window in virtual-screen coordinates."""
+    monitor = USER32.MonitorFromWindow(hwnd, 2)  # MONITOR_DEFAULTTONEAREST
+    if not monitor:
+        raise ctypes.WinError()
+    info = MONITORINFO(cbSize=ctypes.sizeof(MONITORINFO))
+    if not USER32.GetMonitorInfoW(monitor, ctypes.byref(info)):
+        raise ctypes.WinError()
+    rect = info.rcMonitor
+    return rect.left, rect.top, rect.right, rect.bottom
 
 
 def is_foreground(hwnd: int) -> bool:
@@ -254,7 +297,7 @@ class DirectionKeySender:
                 self.events.put(("cancelled", sequence))
                 return
 
-            # Do not turn Ctrl+F9 into Ctrl+Arrow if the start shortcut is still held.
+            # Do not turn Ctrl+F10 into Ctrl+Arrow if the start shortcut is still held.
             while not modifiers_released():
                 if cancel.wait(0.005):
                     self.events.put(("cancelled", sequence))

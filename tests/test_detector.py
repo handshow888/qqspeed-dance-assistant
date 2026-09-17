@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from dataclasses import replace
 import unittest
 import time
 import random
@@ -24,10 +23,16 @@ from dance_tool.keyboard_input import (
     SpaceKeySender,
     is_admin,
 )
-from dance_tool.live import draw_status, frame_limit_delay, space_expire_reason
+from dance_tool.live import (
+    automatic_window_roi,
+    draw_status,
+    frame_limit_delay,
+    relative_roi_to_region,
+    space_expire_reason,
+)
 from dance_tool.recorder import RoiVideoRecorder
 from dance_tool.selector import ModeSelector
-from dance_tool.space_timing import RhythmBarTracker, SpaceTimingConfig
+from dance_tool.space_timing import SliderTracker, SpaceTimingConfig
 from dance_tool.train_yolo import (
     create_auto_validation_split,
     format_class_distribution,
@@ -88,6 +93,42 @@ class ArrowDetectorTests(unittest.TestCase):
             places=6,
         )
         self.assertEqual(0.0, frame_limit_delay(10.0, 60.0, now=10.020))
+
+    def test_auto_roi_uses_full_window_width_and_configured_vertical_bounds(self) -> None:
+        width, height = 1920, 1010
+        roi = automatic_window_roi(
+            width,
+            height,
+            (0, 0, width, height),
+            (0, 0, width, height),
+            0.72,
+            0.93,
+        )
+        region = relative_roi_to_region(width, height, roi)
+        self.assertEqual((0, 727, 1920, 939), region)
+
+        screenshot_path = PROJECT_ROOT / "logs" / "Snipaste_2026-09-17_23-33-48.png"
+        if not screenshot_path.exists():
+            return
+        image = read_image(screenshot_path)
+        self.assertEqual((height, width), image.shape[:2])
+        left, top, right, bottom = region
+        cropped = image[top:bottom, left:right]
+        self.assertEqual((212, 1920), cropped.shape[:2])
+
+    def test_auto_roi_converts_virtual_monitor_coordinates(self) -> None:
+        roi = automatic_window_roi(
+            1920,
+            1080,
+            (2020, 100, 3620, 1000),
+            (1920, 0, 3840, 1080),
+            0.72,
+            0.97,
+        )
+        self.assertEqual(
+            (100, 748, 1700, 973),
+            relative_roi_to_region(1920, 1080, roi),
+        )
         self.assertEqual(0.0, frame_limit_delay(10.0, 0.0, now=10.005))
 
     def test_train_command_defaults_are_for_ten_class_dataset(self) -> None:
@@ -110,8 +151,8 @@ class ArrowDetectorTests(unittest.TestCase):
         self.assertEqual("renewed", renewed["ui_mode"])
         self.assertEqual(0.31, classic["recognition"]["match_threshold"])
         self.assertEqual(0.42, renewed["recognition"]["match_threshold"])
-        self.assertIn("classic", classic["space"]["bar_template"])
-        self.assertIn("renewed", renewed["space"]["bar_template"])
+        self.assertIn("classic", classic["space"]["slider_templates"][0])
+        self.assertIn("renewed", renewed["space"]["slider_templates"][0])
         self.assertFalse(speed_dance["implemented"])
         self.assertEqual("traditional_four_key", self.saved_config["game_mode"])
         self.assertEqual("classic", self.saved_config["ui_mode"])
@@ -262,7 +303,7 @@ class ArrowDetectorTests(unittest.TestCase):
         self.assertEqual(1, len(detections))
         self.assertEqual("DOWN", detections[0].direction)
 
-    def test_yolo_frame_result_exposes_best_bar_and_slider(self) -> None:
+    def test_yolo_frame_result_ignores_bar_and_exposes_best_slider(self) -> None:
         result = yolo_rows_to_frame_detections(
             [
                 [40, 10, 60, 30, 0.97, 2],
@@ -275,8 +316,7 @@ class ArrowDetectorTests(unittest.TestCase):
             100,
         )
         self.assertEqual(1, len(result.arrows))
-        self.assertEqual("rhythm_bar", result.rhythm_bar.class_name)
-        self.assertEqual((10, 5, 190, 25), result.rhythm_bar.box)
+        self.assertFalse(hasattr(result, "rhythm_bar"))
         self.assertEqual(30, result.slider.center_x)
 
     def test_yolo_dataset_saves_named_captures_with_empty_labels_supported(self) -> None:
@@ -463,7 +503,13 @@ class ArrowDetectorTests(unittest.TestCase):
                 "RIGHT",
             ],
         }
-        x, y, width, height = self.classic_config["arrow_roi"]
+        # These legacy fixtures were captured with the original manually selected ROI.
+        x, y, width, height = (
+            0.17239583333333333,
+            0.7212962962962963,
+            0.6375,
+            0.22870370370370371,
+        )
         for filename, sequence in expected.items():
             with self.subTest(filename=filename):
                 image = read_image(
@@ -487,6 +533,10 @@ class ArrowDetectorTests(unittest.TestCase):
 
     def test_configured_hotkeys_do_not_require_shift(self) -> None:
         config = load_config()
+        self.assertEqual("Ctrl+F9", config["hotkeys"]["select_roi"])
+        self.assertEqual("Ctrl+F10", config["hotkeys"]["start"])
+        self.assertEqual("Ctrl+F11", config["hotkeys"]["stop"])
+        self.assertNotIn("pause_resume", config["hotkeys"])
         for value in config["hotkeys"].values():
             self.assertIn("CTRL+", value.upper())
             self.assertNotIn("SHIFT", value.upper())
@@ -693,193 +743,111 @@ class ArrowDetectorTests(unittest.TestCase):
         self.assertIsNone(space_expire_reason(10.0, 12.19, 2200))
         self.assertEqual("timeout 2210ms", space_expire_reason(10.0, 12.21, 2200))
 
-    def test_rhythm_tracker_predicts_centre_crossing(self) -> None:
+    def test_slider_tracker_predicts_fixed_line_crossing(self) -> None:
         timing = SpaceTimingConfig.from_config(
             resolve_mode_config(
                 self.saved_config, "traditional_four_key", "renewed"
             )["space"]
         )
-        tracker = RhythmBarTracker(timing)
+        tracker = SliderTracker(timing)
         observation = None
         for index, marker_x in enumerate((600, 620, 640, 660)):
             frame = np.zeros((246, 1224, 3), dtype=np.uint8)
-            cv2.rectangle(frame, (810, 35), (846, 59), (250, 250, 250), -1)
-            cv2.circle(frame, (marker_x, 47), 13, (240, 225, 135), -1)
-            observation = tracker.observe(frame, index * 0.04)
+            observation = tracker.observe(
+                frame,
+                index * 0.04,
+                detected_slider_rect=(marker_x - 10, 30, marker_x + 10, 50),
+                detected_slider_score=0.95,
+                allow_template_fallback=False,
+            )
         self.assertIsNotNone(observation)
-        self.assertAlmostEqual(828, observation.target_x, delta=3)
+        expected_target = frame.shape[1] * timing.cursor_window_ratio
+        self.assertAlmostEqual(expected_target, observation.target_x, delta=0.01)
         self.assertAlmostEqual(660, observation.marker_x, delta=3)
         self.assertAlmostEqual(500, observation.speed_px_per_second, delta=40)
-        self.assertAlmostEqual(0.336, observation.crossing_at - 0.12, delta=0.04)
+        self.assertAlmostEqual(
+            (expected_target - 660) / 500,
+            observation.crossing_at - 0.12,
+            delta=0.04,
+        )
 
         obscured = np.zeros_like(frame)
-        cached = tracker.observe(obscured, 0.20)
+        cached = tracker.observe(obscured, 0.20, allow_template_fallback=False)
         self.assertIsNone(cached.marker_x)
         self.assertTrue(cached.prediction_cached)
         self.assertAlmostEqual(observation.crossing_at, cached.crossing_at, delta=0.001)
 
-    def test_rhythm_tracker_uses_yolo_bar_slider_and_calibrated_cursor(self) -> None:
+    def test_slider_tracker_uses_window_width_for_fixed_cursor(self) -> None:
         timing = SpaceTimingConfig.from_config(self.classic_config["space"])
-        tracker = RhythmBarTracker(timing)
+        tracker = SliderTracker(timing)
         observation = None
         frame = np.zeros((246, 1224, 3), dtype=np.uint8)
         for index, marker_x in enumerate((500, 520, 540, 560)):
             observation = tracker.observe(
                 frame,
                 index * 0.04,
-                detected_bar_rect=(300, 30, 970, 50),
-                detected_bar_score=0.9,
                 detected_slider_rect=(marker_x - 10, 30, marker_x + 10, 50),
                 detected_slider_score=0.95,
+                allow_template_fallback=False,
             )
         self.assertIsNotNone(observation)
-        self.assertTrue(observation.bar_locked)
-        expected_target = 300 + (970 - 300) * timing.cursor_bar_ratio
-        self.assertAlmostEqual(expected_target, observation.target_x, delta=1)
+        self.assertAlmostEqual(
+            1224 * timing.cursor_window_ratio,
+            observation.target_x,
+            delta=0.01,
+        )
         self.assertAlmostEqual(560, observation.marker_x, delta=1)
         self.assertAlmostEqual(500, observation.speed_px_per_second, delta=40)
-        self.assertIsNone(observation.cursor_match_score)
 
-        shifted = tracker.observe(
-            frame,
-            0.20,
-            detected_bar_rect=(320, 30, 990, 50),
-            detected_bar_score=0.9,
-            detected_slider_rect=(570, 30, 590, 50),
-            detected_slider_score=0.95,
+        wide_frame = np.zeros((253, 1920, 3), dtype=np.uint8)
+        wide = SliderTracker(timing).observe(
+            wide_frame,
+            0.0,
+            allow_template_fallback=False,
         )
-        expected_shifted = shifted.bar_rect[0] + (
-            shifted.bar_rect[2] - shifted.bar_rect[0]
-        ) * timing.cursor_bar_ratio
-        self.assertAlmostEqual(expected_shifted, shifted.target_x, delta=0.01)
+        self.assertAlmostEqual(
+            1920 * timing.cursor_window_ratio,
+            wide.target_x,
+            delta=0.01,
+        )
 
-    def test_yolo_rhythm_mode_does_not_call_opencv_fallback(self) -> None:
+    def test_yolo_slider_mode_does_not_call_opencv_fallback(self) -> None:
         timing = SpaceTimingConfig.from_config(self.classic_config["space"])
-        tracker = RhythmBarTracker(timing)
+        tracker = SliderTracker(timing)
         frame = np.zeros((246, 1224, 3), dtype=np.uint8)
         with patch.object(
             tracker,
             "_find_slider",
             side_effect=AssertionError("不应调用 OpenCV 滑块模板"),
-        ), patch.object(
-            tracker,
-            "_find_cursor",
-            side_effect=AssertionError("不应调用 OpenCV 光标模板"),
         ):
             observation = tracker.observe(
                 frame,
                 0.0,
-                detected_bar_rect=(300, 30, 970, 50),
-                detected_bar_score=0.9,
+                detected_slider_rect=(490, 30, 510, 50),
+                detected_slider_score=0.9,
                 allow_template_fallback=False,
             )
-        self.assertIsNone(observation.marker_x)
+        self.assertEqual(500, observation.marker_x)
 
-        empty_tracker = RhythmBarTracker(timing)
-        with patch.object(
-            empty_tracker,
-            "_accept_bar_candidate",
-            side_effect=AssertionError("不应调用 OpenCV 节奏条模板"),
-        ):
-            missing = empty_tracker.observe(
-                frame,
-                0.0,
-                allow_template_fallback=False,
-            )
-        self.assertEqual((0, 0, 0, 0), missing.bar_rect)
-
-    def test_rhythm_bar_low_pass_filter_reduces_box_jitter(self) -> None:
-        timing = replace(
-            SpaceTimingConfig.from_config(self.classic_config["space"]),
-            bar_low_pass_alpha=0.01,
-        )
-        tracker = RhythmBarTracker(timing)
-        frame = np.zeros((246, 1224, 3), dtype=np.uint8)
-        first = tracker.observe(
+    def test_slider_at_fixed_line_triggers_current_frame_without_speed(self) -> None:
+        timing = SpaceTimingConfig.from_config(self.classic_config["space"])
+        tracker = SliderTracker(timing)
+        frame = np.zeros((253, 1920, 3), dtype=np.uint8)
+        target = frame.shape[1] * timing.cursor_window_ratio
+        observation = tracker.observe(
             frame,
-            0.0,
-            detected_bar_rect=(300, 30, 970, 50),
-            detected_bar_score=0.9,
+            1.25,
+            detected_slider_rect=(
+                round(target - 8),
+                30,
+                round(target + 8),
+                50,
+            ),
+            detected_slider_score=0.95,
+            allow_template_fallback=False,
         )
-        second = tracker.observe(
-            frame,
-            0.02,
-            detected_bar_rect=(318, 30, 988, 50),
-            detected_bar_score=0.9,
-        )
-        third = tracker.observe(
-            frame,
-            0.04,
-            detected_bar_rect=(318, 30, 988, 50),
-            detected_bar_score=0.9,
-        )
-        self.assertEqual(300, first.bar_rect[0])
-        self.assertEqual(300, second.bar_rect[0])
-        self.assertEqual(300, third.bar_rect[0])
-        self.assertAlmostEqual(300.2691, tracker._filtered_bar_box[0], places=3)
-        self.assertLess(
-            third.bar_rect[0] - first.bar_rect[0],
-            318 - first.bar_rect[0],
-        )
-
-        outlier = tracker.observe(
-            frame,
-            0.06,
-            detected_bar_rect=(380, 30, 1050, 50),
-            detected_bar_score=0.9,
-        )
-        self.assertEqual(300, outlier.bar_rect[0])
-
-    def test_rhythm_templates_locate_a_tight_bar_roi(self) -> None:
-        path = PROJECT_ROOT / "recordings" / "标准.mp4"
-        if not path.exists():
-            self.skipTest("标准节奏条录像不存在")
-        video = cv2.VideoCapture(str(path))
-        renewed = resolve_mode_config(
-            self.saved_config, "traditional_four_key", "renewed"
-        )
-        tracker = RhythmBarTracker(SpaceTimingConfig.from_config(renewed["space"]))
-        observation = None
-        try:
-            video.set(cv2.CAP_PROP_POS_FRAMES, 33)
-            for index in range(4):
-                ok, frame = video.read()
-                self.assertTrue(ok)
-                observation = tracker.observe(frame, index / 30)
-        finally:
-            video.release()
-        self.assertIsNotNone(observation)
-        left, top, right, bottom = observation.bar_rect
-        self.assertTrue(observation.bar_locked)
-        self.assertLess(right - left, 700)
-        self.assertLess(bottom - top, 60)
-        self.assertAlmostEqual(829, observation.target_x, delta=5)
-        self.assertIsNotNone(observation.marker_x)
-
-    def test_classic_rhythm_profile_is_calibrated_on_recording(self) -> None:
-        path = PROJECT_ROOT / "recordings" / "roi_20260910_145748_937178.mp4"
-        if not path.exists():
-            self.skipTest("经典模式节奏条录像不存在")
-        video = cv2.VideoCapture(str(path))
-        tracker = RhythmBarTracker(
-            SpaceTimingConfig.from_config(self.classic_config["space"])
-        )
-        observations = []
-        try:
-            for index in range(25):
-                ok, frame = video.read()
-                self.assertTrue(ok)
-                observations.append(tracker.observe(frame, index / 30))
-        finally:
-            video.release()
-        final = observations[-1]
-        self.assertTrue(final.bar_locked)
-        self.assertAlmostEqual(662, final.bar_rect[2] - final.bar_rect[0], delta=3)
-        self.assertAlmostEqual(850, final.target_x, delta=4)
-        self.assertGreater(final.cursor_match_score, 0.8)
-        self.assertGreaterEqual(
-            sum(item.marker_x is not None for item in observations), 15
-        )
+        self.assertAlmostEqual(target, observation.marker_x, delta=1)
+        self.assertEqual(1.25, observation.crossing_at)
 
     def test_send_input_structure_matches_64bit_windows_abi(self) -> None:
         import ctypes

@@ -34,7 +34,6 @@ class YoloObjectDetection:
 @dataclass(frozen=True)
 class YoloFrameDetections:
     arrows: tuple[Detection, ...]
-    rhythm_bar: YoloObjectDetection | None
     slider: YoloObjectDetection | None
 
 
@@ -97,7 +96,6 @@ def yolo_rows_to_frame_detections(
     image_height: int,
     *,
     arrow_confidence: float = 0.5,
-    bar_confidence: float = 0.4,
     slider_confidence: float = 0.3,
     keep_main_row: bool = True,
 ) -> YoloFrameDetections:
@@ -117,8 +115,7 @@ def yolo_rows_to_frame_detections(
         )
     )
 
-    rhythm: dict[str, YoloObjectDetection] = {}
-    thresholds = {"rhythm_bar": bar_confidence, "slider": slider_confidence}
+    slider: YoloObjectDetection | None = None
     for row in materialized:
         if len(row) < 6:
             continue
@@ -127,8 +124,7 @@ def yolo_rows_to_frame_detections(
         if class_id < 0 or class_id >= len(class_names):
             raise ValueError(f"YOLO 返回了未知类别编号：{class_id}")
         class_name = str(class_names[class_id])
-        threshold = thresholds.get(class_name)
-        if threshold is None or float(score) < threshold:
+        if class_name != "slider" or float(score) < slider_confidence:
             continue
         x1 = min(max(0, round(float(left))), image_width)
         y1 = min(max(0, round(float(top))), image_height)
@@ -144,18 +140,16 @@ def yolo_rows_to_frame_detections(
             width=x2 - x1,
             height=y2 - y1,
         )
-        previous = rhythm.get(class_name)
-        if previous is None or candidate.score > previous.score:
-            rhythm[class_name] = candidate
+        if slider is None or candidate.score > slider.score:
+            slider = candidate
     return YoloFrameDetections(
         arrows=arrows,
-        rhythm_bar=rhythm.get("rhythm_bar"),
-        slider=rhythm.get("slider"),
+        slider=slider,
     )
 
 
 class YoloArrowDetector:
-    """Run one YOLO pass for arrows, the rhythm bar, and its slider."""
+    """Run one YOLO pass for arrows and the moving slider."""
 
     def __init__(self, config: dict | None = None):
         values = config or {}
@@ -165,9 +159,6 @@ class YoloArrowDetector:
         if not self.model_path.exists():
             raise ValueError(f"找不到 YOLO 权重：{self.model_path}")
         self.confidence = min(max(float(values.get("confidence", 0.5)), 0.01), 1.0)
-        self.bar_confidence = min(
-            max(float(values.get("rhythm_bar_confidence", 0.4)), 0.01), 1.0
-        )
         self.slider_confidence = min(
             max(float(values.get("slider_confidence", 0.3)), 0.01), 1.0
         )
@@ -199,15 +190,14 @@ class YoloArrowDetector:
             self.class_names = tuple(str(name) for name in raw_names)
         if self.class_names not in {ARROW_CLASS_NAMES, CLASS_NAMES}:
             raise ValueError(
-                "YOLO 权重类别不匹配，期望8类箭头，或追加 rhythm_bar、slider"
+                "YOLO 权重类别不匹配，期望8类箭头，或现有10类箭头/滑块模型"
             )
-        self.supports_rhythm_classes = self.class_names == CLASS_NAMES
+        self.supports_slider_class = self.class_names == CLASS_NAMES
 
     def warmup(self) -> None:
         """Move the model to its inference device before the UI becomes interactive."""
-        # The live arrow ROI is very wide. This aspect ratio produces the same
-        # 160x640 tensor shape used by the current 1224x247 captures.
-        dummy = np.zeros((320, 1280, 3), dtype=np.uint8)
+        # The automatic ROI spans the full game-window width and only its lower band.
+        dummy = np.zeros((256, 1600, 3), dtype=np.uint8)
         self.detect_frame(dummy)
 
     def detect(self, image: np.ndarray, keep_main_row: bool = True) -> list[Detection]:
@@ -219,7 +209,7 @@ class YoloArrowDetector:
         results = self.model.predict(
             source=image,
             imgsz=self.image_size,
-            conf=min(self.confidence, self.bar_confidence, self.slider_confidence),
+            conf=min(self.confidence, self.slider_confidence),
             iou=self.iou,
             device=self.device,
             quantize=self.quantize,
@@ -227,7 +217,7 @@ class YoloArrowDetector:
             verbose=False,
         )
         if not results or results[0].boxes is None:
-            return YoloFrameDetections((), None, None)
+            return YoloFrameDetections((), None)
         rows = results[0].boxes.data.detach().cpu().tolist()
         height, width = image.shape[:2]
         return yolo_rows_to_frame_detections(
@@ -236,7 +226,6 @@ class YoloArrowDetector:
             width,
             height,
             arrow_confidence=self.confidence,
-            bar_confidence=self.bar_confidence,
             slider_confidence=self.slider_confidence,
             keep_main_row=keep_main_row,
         )

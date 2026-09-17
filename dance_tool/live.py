@@ -24,11 +24,13 @@ from .keyboard_input import (
     foreground_window,
     is_admin,
     relaunch_as_admin,
+    window_client_rect,
+    window_monitor_rect,
     window_title,
 )
 from .recorder import RoiVideoRecorder
 from .selector import ModeSelector
-from .space_timing import RhythmBarTracker, RhythmObservation, SpaceTimingConfig
+from .space_timing import SliderObservation, SliderTracker, SpaceTimingConfig
 from .yolo_dataset import YoloDatasetCollector
 from .yolo_detector import YoloArrowDetector, YoloFrameDetections
 
@@ -171,6 +173,96 @@ def relative_roi_to_region(
     return left, top, right, bottom
 
 
+def automatic_window_roi(
+    capture_width: int,
+    capture_height: int,
+    client_rect: tuple[int, int, int, int],
+    monitor_rect: tuple[int, int, int, int],
+    top_ratio: float,
+    bottom_ratio: float,
+) -> list[float]:
+    """Build a full-client-width ROI using vertical ratios within the client area."""
+    if capture_width <= 0 or capture_height <= 0:
+        raise ValueError("截图尺寸无效")
+    if not 0.0 <= top_ratio < bottom_ratio <= 1.0:
+        raise ValueError("auto_roi.top_ratio 和 bottom_ratio 必须满足 0 <= top < bottom <= 1")
+    client_left, client_top, client_right, client_bottom = client_rect
+    monitor_left, monitor_top, monitor_right, monitor_bottom = monitor_rect
+    client_width = client_right - client_left
+    client_height = client_bottom - client_top
+    monitor_width = monitor_right - monitor_left
+    monitor_height = monitor_bottom - monitor_top
+    if client_width <= 0 or client_height <= 0:
+        raise ValueError("当前窗口客户区尺寸无效")
+    if monitor_width <= 0 or monitor_height <= 0:
+        raise ValueError("当前显示器尺寸无效")
+
+    scale_x = capture_width / monitor_width
+    scale_y = capture_height / monitor_height
+    left = round((client_left - monitor_left) * scale_x)
+    right = round((client_right - monitor_left) * scale_x)
+    top = round(
+        (client_top - monitor_top + client_height * top_ratio) * scale_y
+    )
+    bottom = round(
+        (client_top - monitor_top + client_height * bottom_ratio) * scale_y
+    )
+    left = min(max(0, left), capture_width - 1)
+    right = min(max(left + 1, right), capture_width)
+    top = min(max(0, top), capture_height - 1)
+    bottom = min(max(top + 1, bottom), capture_height)
+    return [
+        left / capture_width,
+        top / capture_height,
+        (right - left) / capture_width,
+        (bottom - top) / capture_height,
+    ]
+
+
+def auto_select_arrow_roi(
+    capture: ScreenCapture,
+    config: dict,
+    hwnd: int | None = None,
+) -> bool:
+    """Save the configured lower portion of the current window as the arrow ROI."""
+    selected_hwnd = foreground_window() if hwnd is None else int(hwnd)
+    title = window_title(selected_hwnd)
+    if selected_hwnd == 0 or title == WINDOW_NAME:
+        print("自动选取 ROI 失败：请先聚焦游戏窗口")
+        return False
+    required_title = str(
+        config.get("input", {}).get("target_window_title_contains", "")
+    ).strip()
+    if required_title and required_title.casefold() not in title.casefold():
+        print(f"自动选取 ROI 失败：窗口标题 {title!r} 不包含 {required_title!r}")
+        return False
+
+    values = config.get("auto_roi", {})
+    top_ratio = float(values.get("top_ratio", 0.72))
+    bottom_ratio = float(values.get("bottom_ratio", 0.93))
+    try:
+        roi = automatic_window_roi(
+            capture.width,
+            capture.height,
+            window_client_rect(selected_hwnd),
+            window_monitor_rect(selected_hwnd),
+            top_ratio,
+            bottom_ratio,
+        )
+    except (OSError, ValueError) as error:
+        print(f"自动选取 ROI 失败：{error}")
+        return False
+
+    config["arrow_roi"] = roi
+    save_config(config)
+    region = relative_roi_to_region(capture.width, capture.height, roi)
+    print(
+        f"已按窗口自动设置 ROI：title={title!r}, "
+        f"region={region}, vertical={top_ratio:.3f}-{bottom_ratio:.3f}"
+    )
+    return True
+
+
 def select_arrow_roi(capture: ScreenCapture, config: dict) -> bool:
     screenshot = capture.grab()
     title = "Select arrow area, then press ENTER (ESC cancels)"
@@ -235,7 +327,7 @@ def draw_status(
         dtype=np.uint8,
     )
     canvas[header_height:] = scaled_frame
-    color = {"RUNNING": (60, 230, 80), "PAUSED": (30, 210, 255), "STOPPED": (80, 80, 240)}[state]
+    color = {"RUNNING": (60, 230, 80), "STOPPED": (80, 80, 240)}[state]
     topmost_text = "ON" if always_on_top else "OFF"
     cv2.putText(
         canvas,
@@ -248,7 +340,7 @@ def draw_status(
     )
     cv2.putText(
         canvas,
-        "Ctrl+F7 Top | F8 ROI | F9 Start | F10 Pause | F11 Stop",
+        "Ctrl+F7 Top | F9 ROI | F10 Start | F11 Stop",
         (12, 52),
         cv2.FONT_HERSHEY_SIMPLEX,
         0.52,
@@ -311,7 +403,7 @@ def build_profile_runtime(config: dict):
     space_timing = SpaceTimingConfig.from_config(config.get("space", {}))
     if not space_timing.enabled:
         return detector, stable_required, space_timing, None, None
-    space_tracker = RhythmBarTracker(space_timing)
+    space_tracker = SliderTracker(space_timing)
     space_sender = SpaceKeySender(
         space_timing.key_hold_min_ms,
         space_timing.key_hold_max_ms,
@@ -491,7 +583,7 @@ def run_live(
         title = window_title(hwnd)
         required_title = str(input_config.get("target_window_title_contains", "")).strip()
         if hwnd == 0 or title == WINDOW_NAME:
-            status_message = "Focus game window, then press Ctrl+F9"
+            status_message = "Focus game window, then press Ctrl+F10"
             LOGGER.warning("target_bind_rejected hwnd=%s title=%r", hwnd, title)
             return False
         if required_title and required_title.casefold() not in title.casefold():
@@ -571,7 +663,7 @@ def run_live(
                         if yolo_detector is not None:
                             yolo_enabled = True
                             detector = yolo_detector
-                            status_message = "Detector: YOLO arrows + rhythm (preloaded)"
+                            status_message = "Detector: YOLO arrows + slider (preloaded)"
                             LOGGER.info(
                                 "arrow_detector_switched backend=yolo model=%s",
                                 yolo_detector.model_path,
@@ -665,15 +757,15 @@ def run_live(
                     save_config(saved_config)
                     status_message = f"TOPMOST {'ON' if enabled else 'OFF'}"
                 elif event == "select_roi":
-                    previous_state = state
-                    state = "PAUSED"
+                    was_running = state == "RUNNING"
+                    state = "STOPPED"
                     key_sender.cancel()
                     cancel_space_cycle(clear_target=True)
                     if recorder.active:
                         saved_path = recorder.stop()
                         status_message = f"Recording stopped: {saved_path.name}"
                         LOGGER.warning("recording_stopped_for_roi_change path=%s", saved_path)
-                    if select_arrow_roi(capture, saved_config):
+                    if auto_select_arrow_roi(capture, saved_config):
                         config["arrow_roi"] = saved_config["arrow_roi"]
                         region = relative_roi_to_region(
                             capture.width, capture.height, saved_config["arrow_roi"]
@@ -682,11 +774,14 @@ def run_live(
                         stable_sequence = ()
                         last_observed_sequence = ()
                         last_frame = None
-                    if previous_state == "RUNNING":
+                        status_message = "ROI automatically updated from game window"
+                    else:
+                        status_message = "Auto ROI failed; focus game and press Ctrl+F9"
+                    if was_running:
                         target_hwnd = 0
                         reset_round()
-                        status_message = "ROI updated; focus game and press Ctrl+F9"
-                    state = "STOPPED" if previous_state == "STOPPED" else "PAUSED"
+                        if status_message.startswith("ROI automatically"):
+                            status_message = "ROI updated; focus game and press Ctrl+F10"
                 elif event == "start":
                     if not config.get("implemented", False):
                         status_message = "Selected mode needs recognition assets and rules"
@@ -700,24 +795,6 @@ def run_live(
                         stable_sequence = ()
                         last_observed_sequence = ()
                         reset_round()
-                elif event == "pause_resume":
-                    if state == "RUNNING":
-                        state = "PAUSED"
-                        key_sender.cancel()
-                        cancel_space_cycle()
-                        history.clear()
-                        stable_sequence = ()
-                        last_observed_sequence = ()
-                        reset_round()
-                    elif state == "PAUSED":
-                        if target_hwnd and foreground_window() == target_hwnd:
-                            state = "RUNNING"
-                            history.clear()
-                            stable_sequence = ()
-                            last_observed_sequence = ()
-                            reset_round()
-                        else:
-                            status_message = "Target not focused; focus game and press Ctrl+F9"
                 elif event == "stop":
                     state = "STOPPED"
                     key_sender.cancel()
@@ -757,10 +834,10 @@ def run_live(
                     else:
                         if (
                             yolo_detector is None
-                            or not yolo_detector.supports_rhythm_classes
+                            or not yolo_detector.supports_slider_class
                         ):
                             status_message = (
-                                "Rhythm screenshots require the 10-class YOLO model"
+                                "Rhythm screenshots require a YOLO model with slider"
                             )
                             continue
                         capture_settings = dict(config.get("dataset", {}))
@@ -905,7 +982,7 @@ def run_live(
                     if detector is not None:
                         detections = detector.detect(frame)
             sequence = tuple(item.direction for item in detections)
-            space_observation: RhythmObservation | None = None
+            space_observation: SliderObservation | None = None
             if (
                 state == "RUNNING"
                 and space_timing is not None
@@ -914,15 +991,10 @@ def run_live(
                 and space_timing.enabled
                 and space_tracking_active
             ):
-                rhythm_bar = yolo_frame.rhythm_bar if yolo_frame is not None else None
                 rhythm_slider = yolo_frame.slider if yolo_frame is not None else None
                 space_observation = space_tracker.observe(
                     frame,
                     captured_at,
-                    detected_bar_rect=(rhythm_bar.box if rhythm_bar is not None else None),
-                    detected_bar_score=(
-                        rhythm_bar.score if rhythm_bar is not None else None
-                    ),
                     detected_slider_rect=(
                         rhythm_slider.box if rhythm_slider is not None else None
                     ),
@@ -980,11 +1052,7 @@ def run_live(
                                 space_observation.prediction_cached,
                             )
                 elif space_armed:
-                    if space_observation.bar_rect == (0, 0, 0, 0):
-                        space_status = "LOCATING BAR"
-                    elif space_observation.target_x is None:
-                        space_status = "LOCATING CURSOR"
-                    elif space_observation.marker_x is None:
+                    if space_observation.marker_x is None:
                         space_status = (
                             "TRACKING (cached)"
                             if space_observation.prediction_cached
@@ -1005,13 +1073,10 @@ def run_live(
                         space_offset_ms = None
                         space_status = "EXPIRED"
                         LOGGER.warning(
-                            "space_round_expired reason=%s bar_score=%s "
-                            "slider_score=%s cursor_score=%s marker=%s "
+                            "space_round_expired reason=%s slider_score=%s marker=%s "
                             "target=%s speed=%s crossing=%s cached=%s",
                             expire_reason,
-                            space_observation.bar_match_score,
                             space_observation.slider_match_score,
-                            space_observation.cursor_match_score,
                             space_observation.marker_x,
                             space_observation.target_x,
                             space_observation.speed_px_per_second,
@@ -1103,7 +1168,7 @@ def run_live(
                             space_timing is not None and space_timing.enabled
                         )
                         space_status = (
-                            "TRACKING BAR"
+                            "TRACKING SLIDER"
                             if space_tracking_active
                             else "OFF"
                         )
@@ -1143,14 +1208,11 @@ def run_live(
                         if yolo_detector is None:
                             raise RuntimeError("10-class YOLO model is unavailable")
                         capture_yolo = yolo_detector.detect_frame(frame)
-                    extra_objects = [
-                        item
-                        for item in (
-                            capture_yolo.rhythm_bar,
-                            capture_yolo.slider,
-                        )
-                        if item is not None
-                    ]
+                    extra_objects = (
+                        [capture_yolo.slider]
+                        if capture_yolo.slider is not None
+                        else []
+                    )
                     saved_sample = rhythm_capture_collector.save_event(
                         frame,
                         detections,
@@ -1162,7 +1224,7 @@ def run_live(
                     if saved_sample is not None:
                         image_path, label_path = saved_sample
                         LOGGER.info(
-                            "rhythm_capture_saved image=%s label=%s arrows=%d rhythm=%d",
+                            "rhythm_capture_saved image=%s label=%s arrows=%d slider=%d",
                             image_path,
                             label_path,
                             len(detections),
