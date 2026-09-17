@@ -401,6 +401,15 @@ class SpaceKeySender:
             pressed_at = time.perf_counter()
             hold_ms = random.randint(self.hold_min_ms, self.hold_max_ms)
             send_scan_code(SCAN_CODES["SPACE"], key_up=False, extended=False)
+            self.events.put(
+                (
+                    "started",
+                    {
+                        "pressed_at": pressed_at,
+                        "sampled_offset_ms": round(sampled_offset_ms, 1),
+                    },
+                )
+            )
             try:
                 if cancel.wait(hold_ms / 1000.0):
                     self.events.put(("cancelled", None))

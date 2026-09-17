@@ -29,6 +29,7 @@ from .keyboard_input import (
 from .recorder import RoiVideoRecorder
 from .selector import ModeSelector
 from .space_timing import RhythmBarTracker, RhythmObservation, SpaceTimingConfig
+from .yolo_dataset import YoloDatasetCollector
 
 
 WINDOW_NAME = "Dance Arrow Recognition - Q to quit"
@@ -323,6 +324,7 @@ def run_live(
         space_sender,
     ) = build_profile_runtime(config)
     recorder = RoiVideoRecorder(config.get("recording", {}))
+    dataset_collector = YoloDatasetCollector(config.get("dataset", {}))
     LOGGER.info(
         "live_start game_mode=%s ui_mode=%s implemented=%s admin=%s input_enabled=%s "
         "reaction=%d-%d hold=%d-%d interval=%d-%d",
@@ -371,6 +373,9 @@ def run_live(
     space_tracking_active = False
     space_offset_ms: float | None = None
     space_armed_at: float | None = None
+    dataset_arrow_captured = False
+    dataset_bar_captured = False
+    pending_dataset_events: set[str] = set()
     space_status = (
         "WAIT DIRECTIONS"
         if space_timing is not None and space_timing.enabled
@@ -380,17 +385,20 @@ def run_live(
     def reset_round() -> None:
         nonlocal round_armed, first_seen_at, reaction_delay_seconds
         nonlocal clear_frames, transition_seen, input_status
+        nonlocal dataset_arrow_captured
         round_armed = True
         first_seen_at = None
         reaction_delay_seconds = None
         clear_frames = 0
         transition_seen = False
+        dataset_arrow_captured = False
         input_status = "DISABLED" if not input_enabled else "READY"
 
     def cancel_space_cycle(*, clear_target: bool = False) -> None:
         nonlocal space_armed, space_scheduled, space_tracking_active
         nonlocal space_offset_ms, space_status
         nonlocal space_armed_at
+        nonlocal dataset_bar_captured
         if space_sender is not None:
             space_sender.cancel()
         if space_tracker is not None:
@@ -400,6 +408,7 @@ def run_live(
         space_tracking_active = False
         space_offset_ms = None
         space_armed_at = None
+        dataset_bar_captured = False
         space_status = (
             "WAIT DIRECTIONS"
             if space_timing is not None and space_timing.enabled
@@ -621,7 +630,10 @@ def run_live(
                     LOGGER.error("input_error detail=%s", payload)
 
             for event, payload in (space_sender.poll() if space_sender is not None else []):
-                if event == "completed":
+                if event == "started":
+                    pending_dataset_events.add("space_pressed")
+                    LOGGER.info("space_started payload=%r", payload)
+                elif event == "completed":
                     space_status = (
                         f"PRESSED error={payload['predicted_crossing_error_ms']:+.1f}ms"
                     )
@@ -673,6 +685,8 @@ def run_live(
                 else []
             )
             sequence = tuple(item.direction for item in detections)
+            dataset_events = set(pending_dataset_events)
+            pending_dataset_events.clear()
             space_observation: RhythmObservation | None = None
             if (
                 state == "RUNNING"
@@ -683,6 +697,9 @@ def run_live(
                 and space_tracking_active
             ):
                 space_observation = space_tracker.observe(frame, captured_at)
+                if space_observation.bar_locked and not dataset_bar_captured:
+                    dataset_bar_captured = True
+                    dataset_events.add("bar_detected")
                 crossing_at = space_observation.crossing_at
                 if (
                     space_armed
@@ -870,6 +887,9 @@ def run_live(
                             max(0, round(remaining * 1000)),
                             target_hwnd,
                         )
+                if stable_sequence and not dataset_arrow_captured:
+                    dataset_arrow_captured = True
+                    dataset_events.add("arrow_detected")
                 annotated = (
                     detector.annotate(frame, detections)
                     if detector is not None
@@ -880,6 +900,29 @@ def run_live(
             else:
                 annotated = frame.copy()
 
+            if dataset_events and dataset_collector.enabled:
+                try:
+                    saved_sample = dataset_collector.save_event(
+                        frame,
+                        detections,
+                        game_mode=config["game_mode"],
+                        ui_mode=config["ui_mode"],
+                        reasons=dataset_events,
+                    )
+                    if saved_sample is not None:
+                        image_path, label_path = saved_sample
+                        LOGGER.info(
+                            "dataset_sample_saved image=%s label=%s detections=%d reasons=%r",
+                            image_path,
+                            label_path,
+                            len(detections),
+                            sorted(dataset_events),
+                        )
+                except Exception as error:
+                    dataset_collector.disable()
+                    status_message = f"Dataset saving disabled: {error}"
+                    LOGGER.exception("dataset_sample_save_failed")
+
             elapsed = max(time.perf_counter() - started, 1e-6)
             frame_times.append(elapsed)
             fps = len(frame_times) / max(sum(frame_times), 1e-6)
@@ -887,6 +930,8 @@ def run_live(
             recording_status = None
             if recorder.active:
                 recording_status = f"REC {recorder.elapsed_seconds():.1f}s -> {recorder.output_path.name}"
+            elif dataset_collector.enabled:
+                recording_status = dataset_collector.status
             display = draw_status(
                 annotated,
                 state,

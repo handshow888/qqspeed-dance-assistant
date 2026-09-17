@@ -3,6 +3,7 @@ from __future__ import annotations
 import unittest
 import time
 import random
+from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest.mock import patch
 
@@ -26,6 +27,11 @@ from dance_tool.live import draw_status, space_expire_reason
 from dance_tool.recorder import RoiVideoRecorder
 from dance_tool.selector import ModeSelector
 from dance_tool.space_timing import RhythmBarTracker, SpaceTimingConfig
+from dance_tool.yolo_dataset import (
+    CLASS_NAMES,
+    YoloDatasetCollector,
+    detection_to_yolo_line,
+)
 from main import build_parser
 
 
@@ -152,6 +158,69 @@ class ArrowDetectorTests(unittest.TestCase):
                 matching = [item for item in detections if item.direction == direction]
                 self.assertTrue(matching)
                 self.assertEqual("pressed", max(matching, key=lambda item: item.score).appearance)
+
+    def test_yolo_dataset_uses_eight_direction_and_state_classes(self) -> None:
+        from dance_tool.detector import Detection
+
+        up = Detection("UP", 0.9, 20, 10, 40, 20, "unpressed")
+        right = Detection("RIGHT", 0.8, 100, 40, 20, 30, "pressed")
+        self.assertEqual(
+            "0 0.200000 0.200000 0.200000 0.200000",
+            detection_to_yolo_line(up, 200, 100),
+        )
+        self.assertTrue(detection_to_yolo_line(right, 200, 100).startswith("7 "))
+        self.assertEqual(8, len(CLASS_NAMES))
+
+    def test_yolo_dataset_saves_named_events_with_empty_labels_supported(self) -> None:
+        from dance_tool.detector import Detection
+
+        with TemporaryDirectory() as directory:
+            collector = YoloDatasetCollector(
+                {
+                    "enabled": True,
+                    "output_dir": directory,
+                    "split": "train",
+                }
+            )
+            frame = np.zeros((100, 200, 3), dtype=np.uint8)
+            unpressed = [Detection("LEFT", 0.9, 50, 20, 30, 40, "unpressed")]
+            pressed = [Detection("LEFT", 0.9, 50, 20, 30, 40, "pressed")]
+
+            first = collector.save_event(
+                frame,
+                unpressed,
+                game_mode="traditional_four_key",
+                ui_mode="classic",
+                reasons={"arrow_detected"},
+            )
+            empty = collector.save_event(
+                frame,
+                [],
+                game_mode="traditional_four_key",
+                ui_mode="classic",
+                reasons={"bar_detected", "space_pressed"},
+            )
+            pressed_sample = collector.save_event(
+                frame,
+                pressed,
+                game_mode="traditional_four_key",
+                ui_mode="classic",
+                reasons={"space_pressed"},
+            )
+
+            self.assertIsNotNone(first)
+            self.assertIsNotNone(empty)
+            self.assertIsNotNone(pressed_sample)
+            self.assertEqual(3, collector.saved_count)
+            image_files = list((Path(directory) / "images" / "train").glob("*.png"))
+            label_files = list((Path(directory) / "labels" / "train").glob("*.txt"))
+            self.assertEqual(3, len(image_files))
+            self.assertEqual(3, len(label_files))
+            self.assertTrue((Path(directory) / "data.yaml").exists())
+            self.assertTrue(label_files[-1].read_text(encoding="utf-8").startswith("5 "))
+            empty_labels = [path for path in label_files if path.stat().st_size == 0]
+            self.assertEqual(1, len(empty_labels))
+            self.assertIn("bar_detected+space_pressed", empty_labels[0].name)
 
     def test_classic_full_screenshots_keep_low_confidence_arrows(self) -> None:
         expected = {
@@ -405,6 +474,7 @@ class ArrowDetectorTests(unittest.TestCase):
         while sender.busy and time.perf_counter() < deadline:
             time.sleep(0.005)
         events = sender.poll()
+        self.assertEqual(["started", "completed"], [event for event, _ in events])
         self.assertEqual("completed", events[-1][0])
         self.assertEqual(
             [

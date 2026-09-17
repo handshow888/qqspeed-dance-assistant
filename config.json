@@ -17,6 +17,12 @@
     "codec": "mp4v",
     "output_dir": "recordings"
   },
+  "dataset": {
+    "enabled": true,
+    "output_dir": "datasets/yolo_arrows",
+    "split": "train",
+    "image_extension": ".png"
+  },
   "space": {
     "enabled": true,
     "bar_search_roi_in_arrow_roi": [

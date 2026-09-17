@@ -6,6 +6,7 @@
 2. 实时截取屏幕指定区域并显示识别框。
 3. 箭头序列稳定后，按照可配置的随机时间模拟方向键输入。
 4. 追踪节奏条滑块，在判定区中心附近按正态分布模拟空格输入。
+5. 使用现有模板检测框自动采集 YOLO 箭头图片和 8 类标签。
 
 ## 安装
 
@@ -93,6 +94,51 @@ D:\Pyhton\python3.10.7\python.exe -m venv .venv
   "output_dir": "recordings"
 }
 ```
+
+## YOLO 箭头数据集自动采集
+
+实时识别处于 `RUNNING` 时，程序会把当前箭头 ROI 原图和模板识别得到的检测框保存为 YOLO 数据集。默认输出结构：
+
+```text
+datasets/yolo_arrows/
+├── data.yaml
+├── classes.txt
+├── images/train/
+├── images/val/
+├── labels/train/
+└── labels/val/
+```
+
+类别固定为：
+
+```text
+0 up_unpressed
+1 up_pressed
+2 down_unpressed
+3 down_pressed
+4 left_unpressed
+5 left_pressed
+6 right_unpressed
+7 right_pressed
+```
+
+采集配置位于 `config.json`：
+
+```json
+"dataset": {
+  "enabled": true,
+  "output_dir": "datasets/yolo_arrows",
+  "split": "train",
+  "image_extension": ".png"
+}
+```
+
+- 每一轮箭头连续两帧稳定、节奏条首次锁定，以及自动空格键真正按下时各触发一次保存；同一帧的多个触发会合并为一个样本。
+- 文件名包含 `arrow_detected`、`bar_detected` 或 `space_pressed`，便于检查样本来源。
+- 节奏条和空格事件即使没有检测到箭头也会保存空标签文件；这是对应真实游戏时刻的负样本，不是按固定频率抓取的随机空帧。
+- 采集训练集时保持 `split` 为 `train`。请使用另一段独立录屏或游戏场次，将 `split` 改为 `val` 后采集验证集，避免相邻帧同时进入训练集和验证集。
+- `datasets` 已加入 `.gitignore`，本地采集的大图片不会误提交到仓库。
+- 模板检测框适合作为初始伪标签，但正式训练前仍应抽样检查图片与同名 `.txt`，修正漏框、错框和错误的按下状态。仅使用少量模板图片本身不足以训练出能适应窗口缩放的模型，主要训练数据应来自这里保存的真实 ROI。
 
 ## 方向键输入时序
 
