@@ -93,7 +93,7 @@ class ArrowDetectorTests(unittest.TestCase):
         self.assertEqual("traditional_four_key", classic["game_mode"])
         self.assertEqual("classic", classic["ui_mode"])
         self.assertEqual("renewed", renewed["ui_mode"])
-        self.assertEqual(0.35, classic["recognition"]["match_threshold"])
+        self.assertEqual(0.31, classic["recognition"]["match_threshold"])
         self.assertEqual(0.42, renewed["recognition"]["match_threshold"])
         self.assertIn("classic", classic["space"]["bar_template"])
         self.assertIn("renewed", renewed["space"]["bar_template"])

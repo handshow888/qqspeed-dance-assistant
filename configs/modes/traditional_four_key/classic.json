@@ -8,7 +8,7 @@
     "RIGHT": ["assets/traditional_four_key/classic/templates/右箭头-未按下.png", "assets/traditional_four_key/classic/templates/右箭头-已按下.png"]
   },
   "recognition": {
-    "match_threshold": 0.35,
+    "match_threshold": 0.31,
     "scales": [1.0],
     "nms_iou_threshold": 0.25,
     "stable_frames": 2

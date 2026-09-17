@@ -376,7 +376,12 @@ def run_live(
     window_config = config.setdefault(
         "window", {"scale": 0.55, "always_on_top": False}
     )
-    maximum_fps = max(0.0, float(window_config.get("max_fps", 60)))
+    saved_window_config = saved_config.setdefault("window", {})
+    if "max_fps" not in saved_window_config:
+        saved_window_config["max_fps"] = 60
+        save_config(saved_config)
+    window_config.setdefault("max_fps", saved_window_config["max_fps"])
+    maximum_fps = max(0.0, float(window_config["max_fps"]))
     LOGGER.info(
         "live_start game_mode=%s ui_mode=%s implemented=%s admin=%s input_enabled=%s "
         "reaction=%d-%d hold=%d-%d interval=%d-%d max_fps=%g",

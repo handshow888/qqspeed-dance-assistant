@@ -10,7 +10,8 @@
   ],
   "window": {
     "scale": 0.55,
-    "always_on_top": true
+    "always_on_top": true,
+    "max_fps": 60
   },
   "recording": {
     "fps": 30,
@@ -18,7 +19,7 @@
     "output_dir": "recordings"
   },
   "dataset": {
-    "enabled": true,
+    "enabled": false,
     "output_dir": "datasets/yolo_arrows",
     "split": "train",
     "image_extension": ".png"
@@ -79,5 +80,8 @@
     "pause_resume": "Ctrl+F10",
     "stop": "Ctrl+F11",
     "record_roi": "Ctrl+F12"
+  },
+  "yolo": {
+    "enabled": true
   }
 }
