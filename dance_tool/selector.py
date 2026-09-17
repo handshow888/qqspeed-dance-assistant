@@ -38,6 +38,7 @@ class ModeSelector:
         self.game_mode = "traditional_four_key"
         self.ui_mode = "classic"
         self.dataset_enabled = False
+        self.yolo_enabled = False
 
     def draw(
         self,
@@ -46,27 +47,21 @@ class ModeSelector:
         game_mode: str,
         ui_mode: str,
         dataset_enabled: bool = False,
+        yolo_enabled: bool = False,
     ) -> None:
         self.enabled = state == "STOPPED"
         self.game_mode = game_mode
         self.ui_mode = ui_mode
         self.dataset_enabled = bool(dataset_enabled)
+        self.yolo_enabled = bool(yolo_enabled)
         self.buttons = []
         if canvas.shape[1] < 430:
             return
         self._draw_row(canvas, "GAME", "game_mode", GAME_MODES, 116, game_mode)
         self._draw_row(canvas, "UI", "ui_mode", UI_MODES, 151, ui_mode)
-        self._draw_dataset_toggle(canvas, 186)
+        self._draw_toggles(canvas, 186)
 
-    def _draw_dataset_toggle(self, canvas: np.ndarray, top: int) -> None:
-        left = 66
-        right = min(canvas.shape[1] - 6, left + 180)
-        choice = Choice("toggle", "数据集录制", "ON" if self.dataset_enabled else "OFF")
-        self.buttons.append(
-            Button("dataset_toggle", choice, left, top, right, top + 29)
-        )
-        fill = (45, 110, 55) if self.dataset_enabled else (55, 55, 65)
-        border = (80, 235, 105) if self.dataset_enabled else (135, 135, 155)
+    def _draw_toggles(self, canvas: np.ndarray, top: int) -> None:
         cv2.putText(
             canvas,
             "DATA:",
@@ -77,9 +72,58 @@ class ModeSelector:
             1,
             cv2.LINE_AA,
         )
+        self._draw_toggle_button(
+            canvas,
+            "dataset_toggle",
+            "RECORD",
+            self.dataset_enabled,
+            True,
+            66,
+            top,
+            180,
+        )
+        self._draw_toggle_button(
+            canvas,
+            "yolo_toggle",
+            "YOLO",
+            self.yolo_enabled,
+            self.enabled,
+            252,
+            top,
+            170,
+        )
+
+    def _draw_toggle_button(
+        self,
+        canvas: np.ndarray,
+        kind: str,
+        label: str,
+        enabled: bool,
+        interactive: bool,
+        left: int,
+        top: int,
+        width: int,
+    ) -> None:
+        right = min(canvas.shape[1] - 6, left + width)
+        choice = Choice("toggle", label, "ON" if enabled else "OFF")
+        self.buttons.append(
+            Button(kind, choice, left, top, right, top + 29)
+        )
+        if not interactive:
+            fill = (65, 85, 65) if enabled else (48, 48, 48)
+            border = (90, 90, 90)
+            text_color = (135, 135, 135)
+        elif enabled:
+            fill = (45, 110, 55)
+            border = (80, 235, 105)
+            text_color = (245, 255, 245)
+        else:
+            fill = (55, 55, 65)
+            border = (135, 135, 155)
+            text_color = (245, 255, 245)
         cv2.rectangle(canvas, (left, top), (right, top + 29), fill, -1)
         cv2.rectangle(canvas, (left, top), (right, top + 29), border, 1)
-        text = f"RECORD {choice.display}"
+        text = f"{label} {choice.display}"
         (text_width, text_height), _ = cv2.getTextSize(
             text, cv2.FONT_HERSHEY_SIMPLEX, 0.43, 1
         )
@@ -92,7 +136,7 @@ class ModeSelector:
             ),
             cv2.FONT_HERSHEY_SIMPLEX,
             0.43,
-            (245, 255, 245),
+            text_color,
             1,
             cv2.LINE_AA,
         )
@@ -167,10 +211,21 @@ class ModeSelector:
         if button.kind == "dataset_toggle":
             self.events.put(
                 SelectorEvent(
-                    "dataset_toggle",
+                    button.kind,
                     "false" if self.dataset_enabled else "true",
                 )
             )
+            return
+        if button.kind == "yolo_toggle":
+            if not self.enabled:
+                self.events.put(SelectorEvent("blocked", "yolo"))
+            else:
+                self.events.put(
+                    SelectorEvent(
+                        button.kind,
+                        "false" if self.yolo_enabled else "true",
+                    )
+                )
             return
         if not self.enabled:
             self.events.put(SelectorEvent("blocked"))

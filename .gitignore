@@ -16,6 +16,8 @@ htmlcov/
 /recordings/
 /datasets/
 /runs/
+/weights/
+/yolo*.pt
 /build/
 /dist/
 *.egg-info/

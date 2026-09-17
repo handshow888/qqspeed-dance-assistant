@@ -30,6 +30,7 @@ from .recorder import RoiVideoRecorder
 from .selector import ModeSelector
 from .space_timing import RhythmBarTracker, RhythmObservation, SpaceTimingConfig
 from .yolo_dataset import YoloDatasetCollector
+from .yolo_detector import YoloArrowDetector
 
 
 WINDOW_NAME = "Dance Arrow Recognition - Q to quit"
@@ -192,6 +193,7 @@ def draw_status(
     game_mode: str = "",
     selector: ModeSelector | None = None,
     dataset_enabled: bool = False,
+    yolo_enabled: bool = False,
 ) -> np.ndarray:
     scale = min(max(float(display_scale), 0.2), 1.0)
     display_width = max(1, round(frame.shape[1] * scale))
@@ -251,7 +253,14 @@ def draw_status(
         cv2.LINE_AA,
     )
     if selector is not None:
-        selector.draw(canvas, state, game_mode, ui_mode, dataset_enabled)
+        selector.draw(
+            canvas,
+            state,
+            game_mode,
+            ui_mode,
+            dataset_enabled,
+            yolo_enabled,
+        )
 
     footer = recording_status or message or "Ctrl+F12 Start/Stop ROI recording"
     if footer:
@@ -318,12 +327,28 @@ def run_live(
     input_timing = InputTiming.from_config(input_config)
     key_sender = DirectionKeySender(input_timing)
     (
-        detector,
+        opencv_detector,
         stable_required,
         space_timing,
         space_tracker,
         space_sender,
     ) = build_profile_runtime(config)
+    detector = opencv_detector
+    yolo_detector: YoloArrowDetector | None = None
+    yolo_enabled = bool(config.get("yolo", {}).get("enabled", False))
+    yolo_startup_error: str | None = None
+    if yolo_enabled:
+        try:
+            yolo_detector = YoloArrowDetector(config.get("yolo", {}))
+        except (OSError, RuntimeError, ValueError) as error:
+            yolo_enabled = False
+            saved_config.setdefault("yolo", {})["enabled"] = False
+            config.setdefault("yolo", {})["enabled"] = False
+            save_config(saved_config)
+            yolo_startup_error = f"YOLO disabled: {error}"
+            LOGGER.exception("yolo_startup_failed")
+        else:
+            detector = yolo_detector
     recorder = RoiVideoRecorder(config.get("recording", {}))
     dataset_collector = YoloDatasetCollector(config.get("dataset", {}))
     LOGGER.info(
@@ -355,7 +380,7 @@ def run_live(
     history: deque[tuple[str, ...]] = deque(maxlen=stable_required)
     stable_sequence: tuple[str, ...] = ()
     last_frame: np.ndarray | None = None
-    status_message: str | None = None
+    status_message: str | None = yolo_startup_error
     frame_times: deque[float] = deque(maxlen=30)
     target_hwnd = 0
     target_title = ""
@@ -474,7 +499,52 @@ def run_live(
                         LOGGER.info("dataset_recording_toggled enabled=false")
                     save_config(saved_config)
                     continue
-                if selection.kind == "blocked" or state != "STOPPED":
+                if selection.kind == "yolo_toggle":
+                    if state != "STOPPED":
+                        status_message = "Stop recognition before switching YOLO"
+                        continue
+                    enable_yolo = selection.value == "true"
+                    yolo_settings = saved_config.setdefault("yolo", {})
+                    yolo_settings["enabled"] = enable_yolo
+                    config.setdefault("yolo", {})["enabled"] = enable_yolo
+                    if enable_yolo:
+                        try:
+                            yolo_detector = YoloArrowDetector(yolo_settings)
+                        except (OSError, RuntimeError, ValueError) as error:
+                            yolo_enabled = False
+                            yolo_settings["enabled"] = False
+                            config["yolo"]["enabled"] = False
+                            detector = opencv_detector
+                            status_message = f"YOLO enable failed: {error}"
+                            LOGGER.exception("yolo_enable_failed")
+                        else:
+                            yolo_enabled = True
+                            detector = yolo_detector
+                            status_message = "Arrow detector: YOLO"
+                            LOGGER.info(
+                                "arrow_detector_switched backend=yolo model=%s",
+                                yolo_detector.model_path,
+                            )
+                    else:
+                        yolo_enabled = False
+                        yolo_detector = None
+                        detector = opencv_detector
+                        status_message = "Arrow detector: OpenCV"
+                        LOGGER.info("arrow_detector_switched backend=opencv")
+                    save_config(saved_config)
+                    history.clear()
+                    stable_sequence = ()
+                    last_observed_sequence = ()
+                    reset_round()
+                    continue
+                if selection.kind == "blocked":
+                    status_message = (
+                        "Stop recognition before switching YOLO"
+                        if selection.value == "yolo"
+                        else "Stop recognition before switching mode"
+                    )
+                    continue
+                if state != "STOPPED":
                     status_message = "Stop recognition before switching mode"
                     continue
                 selected_game = (
@@ -503,12 +573,13 @@ def run_live(
                     space_sender.close()
                 config = next_config
                 (
-                    detector,
+                    opencv_detector,
                     stable_required,
                     space_timing,
                     space_tracker,
                     space_sender,
                 ) = next_runtime
+                detector = yolo_detector if yolo_enabled else opencv_detector
                 saved_config["game_mode"] = config["game_mode"]
                 saved_config["ui_mode"] = config["ui_mode"]
                 save_config(saved_config)
@@ -707,11 +778,29 @@ def run_live(
                     LOGGER.exception("recording_write_failed")
 
             captured_at = time.perf_counter()
-            detections = (
-                detector.detect(frame)
-                if state == "RUNNING" and detector is not None
-                else []
-            )
+            detections = []
+            if state == "RUNNING" and detector is not None:
+                try:
+                    detections = detector.detect(frame)
+                except Exception as error:
+                    if not yolo_enabled:
+                        raise
+                    LOGGER.exception("yolo_inference_failed")
+                    yolo_enabled = False
+                    yolo_detector = None
+                    saved_config.setdefault("yolo", {})["enabled"] = False
+                    config.setdefault("yolo", {})["enabled"] = False
+                    save_config(saved_config)
+                    detector = opencv_detector
+                    key_sender.cancel()
+                    cancel_space_cycle()
+                    history.clear()
+                    stable_sequence = ()
+                    last_observed_sequence = ()
+                    reset_round()
+                    status_message = f"YOLO failed; using OpenCV: {error}"
+                    if detector is not None:
+                        detections = detector.detect(frame)
             sequence = tuple(item.direction for item in detections)
             dataset_events = set(pending_dataset_events)
             pending_dataset_events.clear()
@@ -980,6 +1069,7 @@ def run_live(
                 config["game_mode"],
                 selector,
                 dataset_collector.enabled,
+                yolo_enabled,
             )
             preview.show(display)
             key = cv2.waitKey(1) & 0xFF

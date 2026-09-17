@@ -33,6 +33,7 @@ from dance_tool.yolo_dataset import (
     YoloDatasetCollector,
     detection_to_yolo_line,
 )
+from dance_tool.yolo_detector import yolo_rows_to_detections
 from main import build_parser
 
 
@@ -180,6 +181,23 @@ class ArrowDetectorTests(unittest.TestCase):
         )
         self.assertTrue(detection_to_yolo_line(right, 200, 100).startswith("7 "))
         self.assertEqual(8, len(CLASS_NAMES))
+
+    def test_yolo_output_maps_to_existing_detection_interface(self) -> None:
+        detections = yolo_rows_to_detections(
+            [
+                [80.2, 10.4, 110.8, 40.6, 0.91, 7],
+                [10.1, 11.2, 39.8, 41.1, 0.88, 0],
+            ],
+            CLASS_NAMES,
+            200,
+            100,
+        )
+        self.assertEqual(["UP", "RIGHT"], [item.direction for item in detections])
+        self.assertEqual(
+            ["unpressed", "pressed"],
+            [item.appearance for item in detections],
+        )
+        self.assertEqual((10, 11, 40, 41), detections[0].box)
 
     def test_yolo_dataset_saves_named_events_with_empty_labels_supported(self) -> None:
         from dance_tool.detector import Detection
@@ -432,6 +450,57 @@ class ArrowDetectorTests(unittest.TestCase):
             None,
         )
         self.assertEqual("false", selector.poll()[0].value)
+
+    def test_yolo_toggle_is_right_of_recording_and_blocked_while_running(self) -> None:
+        selector = ModeSelector()
+        canvas = np.zeros((243, 700, 3), dtype=np.uint8)
+        selector.draw(
+            canvas,
+            "STOPPED",
+            "traditional_four_key",
+            "classic",
+            dataset_enabled=False,
+            yolo_enabled=False,
+        )
+        recording = next(
+            button for button in selector.buttons if button.kind == "dataset_toggle"
+        )
+        yolo = next(
+            button for button in selector.buttons if button.kind == "yolo_toggle"
+        )
+        self.assertGreater(yolo.left, recording.right)
+        selector.on_mouse(
+            cv2.EVENT_LBUTTONUP,
+            (yolo.left + yolo.right) // 2,
+            (yolo.top + yolo.bottom) // 2,
+            0,
+            None,
+        )
+        event = selector.poll()[0]
+        self.assertEqual("yolo_toggle", event.kind)
+        self.assertEqual("true", event.value)
+
+        selector.draw(
+            canvas,
+            "RUNNING",
+            "traditional_four_key",
+            "classic",
+            dataset_enabled=False,
+            yolo_enabled=True,
+        )
+        yolo = next(
+            button for button in selector.buttons if button.kind == "yolo_toggle"
+        )
+        selector.on_mouse(
+            cv2.EVENT_LBUTTONUP,
+            (yolo.left + yolo.right) // 2,
+            (yolo.top + yolo.bottom) // 2,
+            0,
+            None,
+        )
+        blocked = selector.poll()[0]
+        self.assertEqual("blocked", blocked.kind)
+        self.assertEqual("yolo", blocked.value)
 
     def test_reaction_delay_has_hard_110ms_floor(self) -> None:
         timing = InputTiming.from_config(
