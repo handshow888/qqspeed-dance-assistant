@@ -8,7 +8,13 @@ import cv2
 import dxcam
 import numpy as np
 
-from .config import PROJECT_ROOT, load_config, resolve_ui_config, save_config
+from .config import (
+    PROJECT_ROOT,
+    create_log_path,
+    load_config,
+    resolve_mode_config,
+    save_config,
+)
 from .detector import ArrowDetector
 from .hotkeys import GlobalHotkeys
 from .keyboard_input import (
@@ -21,6 +27,7 @@ from .keyboard_input import (
     window_title,
 )
 from .recorder import RoiVideoRecorder
+from .selector import ModeSelector
 from .space_timing import RhythmBarTracker, RhythmObservation, SpaceTimingConfig
 
 
@@ -41,8 +48,7 @@ def space_expire_reason(
 
 
 def configure_runtime_logging() -> None:
-    log_path = PROJECT_ROOT / "debug" / "runtime.log"
-    log_path.parent.mkdir(parents=True, exist_ok=True)
+    log_path = create_log_path()
     handler = logging.FileHandler(log_path, encoding="utf-8")
     handler.setFormatter(logging.Formatter("%(asctime)s.%(msecs)03d %(levelname)s %(message)s", "%H:%M:%S"))
     LOGGER.handlers.clear()
@@ -52,16 +58,19 @@ def configure_runtime_logging() -> None:
 
 
 class PreviewWindow:
-    def __init__(self, scale: float, always_on_top: bool):
+    def __init__(self, scale: float, always_on_top: bool, mouse_callback=None):
         self.scale = min(max(float(scale), 0.2), 1.0)
         self.always_on_top = bool(always_on_top)
         self._created = False
         self._source_size: tuple[int, int] | None = None
+        self.mouse_callback = mouse_callback
 
     def show(self, image: np.ndarray) -> None:
         source_size = (image.shape[1], image.shape[0])
         if not self._created:
             cv2.namedWindow(WINDOW_NAME, cv2.WINDOW_NORMAL | cv2.WINDOW_KEEPRATIO)
+            if self.mouse_callback is not None:
+                cv2.setMouseCallback(WINDOW_NAME, self.mouse_callback)
             self._created = True
 
         cv2.imshow(WINDOW_NAME, image)
@@ -179,6 +188,8 @@ def draw_status(
     display_scale: float = 1.0,
     space_status: str = "OFF",
     ui_mode: str = "",
+    game_mode: str = "",
+    selector: ModeSelector | None = None,
 ) -> np.ndarray:
     scale = min(max(float(display_scale), 0.2), 1.0)
     display_width = max(1, round(frame.shape[1] * scale))
@@ -188,7 +199,7 @@ def draw_status(
 
     # This header is added after image scaling, so its text remains at a fixed,
     # readable pixel size even when the recognition image is displayed at 55%.
-    header_height = 138
+    header_height = 208
     canvas = np.zeros(
         (scaled_frame.shape[0] + header_height, scaled_frame.shape[1], 3),
         dtype=np.uint8,
@@ -198,13 +209,12 @@ def draw_status(
     topmost_text = "ON" if always_on_top else "OFF"
     cv2.putText(
         canvas,
-        f"{state}   MODE: {ui_mode.upper() or '-'}   FPS: {fps:.1f}   "
-        f"TOPMOST: {topmost_text}   INPUT: {input_status}",
+        f"{state}  FPS {fps:.1f}  TOP {topmost_text}  INPUT {input_status}",
         (12, 25),
         cv2.FONT_HERSHEY_SIMPLEX,
         0.62,
         color,
-        2,
+        1,
     )
     cv2.putText(
         canvas,
@@ -213,7 +223,7 @@ def draw_status(
         cv2.FONT_HERSHEY_SIMPLEX,
         0.52,
         (240, 240, 240),
-        2,
+        1,
         cv2.LINE_AA,
     )
     short_direction = {"UP": "U", "DOWN": "D", "LEFT": "L", "RIGHT": "R"}
@@ -225,7 +235,7 @@ def draw_status(
         cv2.FONT_HERSHEY_SIMPLEX,
         0.58,
         (240, 240, 240),
-        2,
+        1,
         cv2.LINE_AA,
     )
     cv2.putText(
@@ -235,15 +245,18 @@ def draw_status(
         cv2.FONT_HERSHEY_SIMPLEX,
         0.54,
         (255, 220, 80),
-        2,
+        1,
         cv2.LINE_AA,
     )
+    if selector is not None:
+        selector.draw(canvas, state, game_mode, ui_mode)
+
     footer = recording_status or message or "Ctrl+F12 Start/Stop ROI recording"
     if footer:
         cv2.putText(
             canvas,
             footer[:80],
-            (12, 130),
+            (12, 201),
             cv2.FONT_HERSHEY_SIMPLEX,
             0.46,
             (80, 180, 255),
@@ -253,42 +266,69 @@ def draw_status(
     return canvas
 
 
-def run_live(ui_mode: str | None = None) -> int:
-    configure_runtime_logging()
+def build_profile_runtime(config: dict):
+    if not bool(config.get("implemented", False)):
+        return None, 1, None, None, None
+    detector = ArrowDetector(config)
+    stable_required = int(config["recognition"]["stable_frames"])
+    space_timing = SpaceTimingConfig.from_config(config.get("space", {}))
+    if not space_timing.enabled:
+        return detector, stable_required, space_timing, None, None
+    space_tracker = RhythmBarTracker(space_timing)
+    space_sender = SpaceKeySender(
+        space_timing.key_hold_min_ms,
+        space_timing.key_hold_max_ms,
+    )
+    return detector, stable_required, space_timing, space_tracker, space_sender
+
+
+def run_live(
+    game_mode: str | None = None,
+    ui_mode: str | None = None,
+) -> int:
     saved_config = load_config()
-    config = resolve_ui_config(saved_config, ui_mode)
-    print(f"当前 UI 模式：{config.get('name', config['ui_mode'])} ({config['ui_mode']})")
+    config = resolve_mode_config(saved_config, game_mode, ui_mode)
+    print(
+        f"当前模式：{config.get('name', config['game_mode'])} "
+        f"({config['game_mode']} / {config['ui_mode']})"
+    )
     input_config = config["input"]
     input_enabled = bool(input_config.get("enabled", True))
+    elevation_failed = False
     if input_enabled and bool(input_config.get("auto_elevate", True)) and not is_admin():
-        LOGGER.warning("elevation_required; requesting UAC relaunch")
         print("游戏以管理员权限运行，正在请求 UAC 权限并重新启动 Demo……")
         if relaunch_as_admin(str(PROJECT_ROOT)):
             return 0
-        LOGGER.error("elevation_request_failed_or_cancelled")
+        elevation_failed = True
         print("未获得管理员权限，方向键输入仍可能被游戏忽略。")
+
+    configure_runtime_logging()
+    if elevation_failed:
+        LOGGER.error("elevation_request_failed_or_cancelled")
 
     if not saved_config.get("arrow_roi"):
         print("尚未标定箭头区域，正在打开区域选择窗口……")
         if calibrate_arrow_roi() != 0:
             return 1
         saved_config = load_config()
-        config = resolve_ui_config(saved_config, ui_mode)
+        config = resolve_mode_config(saved_config, game_mode, ui_mode)
 
-    detector = ArrowDetector(config)
-    stable_required = int(config["recognition"]["stable_frames"])
     input_timing = InputTiming.from_config(input_config)
     key_sender = DirectionKeySender(input_timing)
-    space_timing = SpaceTimingConfig.from_config(config.get("space", {}))
-    space_tracker = RhythmBarTracker(space_timing)
-    space_sender = SpaceKeySender(
-        space_timing.key_hold_min_ms,
-        space_timing.key_hold_max_ms,
-    )
+    (
+        detector,
+        stable_required,
+        space_timing,
+        space_tracker,
+        space_sender,
+    ) = build_profile_runtime(config)
     recorder = RoiVideoRecorder(config.get("recording", {}))
     LOGGER.info(
-        "live_start ui_mode=%s admin=%s input_enabled=%s reaction=%d-%d hold=%d-%d interval=%d-%d",
+        "live_start game_mode=%s ui_mode=%s implemented=%s admin=%s input_enabled=%s "
+        "reaction=%d-%d hold=%d-%d interval=%d-%d",
+        config["game_mode"],
         config["ui_mode"],
+        config.get("implemented", False),
         is_admin(),
         input_enabled,
         input_timing.reaction_min_ms,
@@ -299,9 +339,11 @@ def run_live(ui_mode: str | None = None) -> int:
         input_timing.inter_key_max_ms,
     )
     window_config = config.setdefault("window", {"scale": 0.55, "always_on_top": False})
+    selector = ModeSelector()
     preview = PreviewWindow(
         scale=float(window_config.get("scale", 0.55)),
         always_on_top=bool(window_config.get("always_on_top", False)),
+        mouse_callback=selector.on_mouse,
     )
     hotkeys = GlobalHotkeys(config["hotkeys"])
     hotkeys.start()
@@ -329,7 +371,11 @@ def run_live(ui_mode: str | None = None) -> int:
     space_tracking_active = False
     space_offset_ms: float | None = None
     space_armed_at: float | None = None
-    space_status = "OFF" if not space_timing.enabled else "WAIT DIRECTIONS"
+    space_status = (
+        "WAIT DIRECTIONS"
+        if space_timing is not None and space_timing.enabled
+        else "OFF"
+    )
 
     def reset_round() -> None:
         nonlocal round_armed, first_seen_at, reaction_delay_seconds
@@ -345,14 +391,20 @@ def run_live(ui_mode: str | None = None) -> int:
         nonlocal space_armed, space_scheduled, space_tracking_active
         nonlocal space_offset_ms, space_status
         nonlocal space_armed_at
-        space_sender.cancel()
-        space_tracker.reset(keep_target=not clear_target)
+        if space_sender is not None:
+            space_sender.cancel()
+        if space_tracker is not None:
+            space_tracker.reset(keep_target=not clear_target)
         space_armed = False
         space_scheduled = False
         space_tracking_active = False
         space_offset_ms = None
         space_armed_at = None
-        space_status = "OFF" if not space_timing.enabled else "WAIT DIRECTIONS"
+        space_status = (
+            "WAIT DIRECTIONS"
+            if space_timing is not None and space_timing.enabled
+            else "OFF"
+        )
 
     def bind_foreground_target() -> bool:
         nonlocal target_hwnd, target_title, status_message
@@ -384,6 +436,68 @@ def run_live(ui_mode: str | None = None) -> int:
     region = relative_roi_to_region(capture.width, capture.height, config["arrow_roi"])
     try:
         while True:
+            for selection in selector.poll():
+                if selection.kind == "blocked" or state != "STOPPED":
+                    status_message = "Stop recognition before switching mode"
+                    continue
+                selected_game = (
+                    selection.value
+                    if selection.kind == "game_mode"
+                    else config["game_mode"]
+                )
+                selected_ui = (
+                    selection.value
+                    if selection.kind == "ui_mode"
+                    else config["ui_mode"]
+                )
+                try:
+                    next_config = resolve_mode_config(
+                        saved_config,
+                        selected_game,
+                        selected_ui,
+                    )
+                    next_runtime = build_profile_runtime(next_config)
+                except (OSError, ValueError) as error:
+                    status_message = f"Switch failed: {error}"
+                    LOGGER.exception("profile_switch_failed")
+                    continue
+
+                if space_sender is not None:
+                    space_sender.close()
+                config = next_config
+                (
+                    detector,
+                    stable_required,
+                    space_timing,
+                    space_tracker,
+                    space_sender,
+                ) = next_runtime
+                saved_config["game_mode"] = config["game_mode"]
+                saved_config["ui_mode"] = config["ui_mode"]
+                save_config(saved_config)
+                history = deque(maxlen=stable_required)
+                stable_sequence = ()
+                last_observed_sequence = ()
+                last_sent_sequence = ()
+                last_input_completed_at = None
+                target_hwnd = 0
+                target_title = ""
+                reset_round()
+                cancel_space_cycle(clear_target=True)
+                if config.get("implemented", False):
+                    status_message = (
+                        f"Selected: {config['game_mode']} / {config['ui_mode']}"
+                    )
+                else:
+                    status_message = "Selected mode needs recognition assets and rules"
+                    print(config.get("unavailable_reason", "所选模式尚未配置"))
+                LOGGER.info(
+                    "profile_switched game_mode=%s ui_mode=%s implemented=%s",
+                    config["game_mode"],
+                    config["ui_mode"],
+                    config.get("implemented", False),
+                )
+
             for event, message in hotkeys.poll():
                 if event == "toggle_topmost":
                     enabled = preview.toggle_topmost()
@@ -414,6 +528,10 @@ def run_live(ui_mode: str | None = None) -> int:
                         status_message = "ROI updated; focus game and press Ctrl+F9"
                     state = "STOPPED" if previous_state == "STOPPED" else "PAUSED"
                 elif event == "start":
+                    if not config.get("implemented", False):
+                        status_message = "Selected mode needs recognition assets and rules"
+                        print(config.get("unavailable_reason", "所选模式尚未配置"))
+                        continue
                     key_sender.cancel()
                     cancel_space_cycle(clear_target=True)
                     if bind_foreground_target():
@@ -483,7 +601,8 @@ def run_live(ui_mode: str | None = None) -> int:
                     print(f"方向键输入完成：{payload}")
                     LOGGER.info("input_completed payload=%r", payload)
                     if (
-                        space_timing.enabled
+                        space_timing is not None
+                        and space_timing.enabled
                         and space_tracking_active
                         and state == "RUNNING"
                         and target_hwnd
@@ -501,7 +620,7 @@ def run_live(ui_mode: str | None = None) -> int:
                     status_message = str(payload)
                     LOGGER.error("input_error detail=%s", payload)
 
-            for event, payload in space_sender.poll():
+            for event, payload in (space_sender.poll() if space_sender is not None else []):
                 if event == "completed":
                     space_status = (
                         f"PRESSED error={payload['predicted_crossing_error_ms']:+.1f}ms"
@@ -548,10 +667,21 @@ def run_live(ui_mode: str | None = None) -> int:
                     LOGGER.exception("recording_write_failed")
 
             captured_at = time.perf_counter()
-            detections = detector.detect(frame) if state == "RUNNING" else []
+            detections = (
+                detector.detect(frame)
+                if state == "RUNNING" and detector is not None
+                else []
+            )
             sequence = tuple(item.direction for item in detections)
             space_observation: RhythmObservation | None = None
-            if state == "RUNNING" and space_timing.enabled and space_tracking_active:
+            if (
+                state == "RUNNING"
+                and space_timing is not None
+                and space_tracker is not None
+                and space_sender is not None
+                and space_timing.enabled
+                and space_tracking_active
+            ):
                 space_observation = space_tracker.observe(frame, captured_at)
                 crossing_at = space_observation.crossing_at
                 if (
@@ -719,7 +849,9 @@ def run_live(ui_mode: str | None = None) -> int:
                     ):
                         round_armed = False
                         cancel_space_cycle()
-                        space_tracking_active = space_timing.enabled
+                        space_tracking_active = bool(
+                            space_timing is not None and space_timing.enabled
+                        )
                         space_status = (
                             "TRACKING BAR"
                             if space_tracking_active
@@ -738,8 +870,12 @@ def run_live(ui_mode: str | None = None) -> int:
                             max(0, round(remaining * 1000)),
                             target_hwnd,
                         )
-                annotated = detector.annotate(frame, detections)
-                if space_observation is not None:
+                annotated = (
+                    detector.annotate(frame, detections)
+                    if detector is not None
+                    else frame.copy()
+                )
+                if space_observation is not None and space_tracker is not None:
                     annotated = space_tracker.annotate(annotated, space_observation)
             else:
                 annotated = frame.copy()
@@ -765,6 +901,8 @@ def run_live(ui_mode: str | None = None) -> int:
                 preview.scale,
                 space_status,
                 config["ui_mode"],
+                config["game_mode"],
+                selector,
             )
             preview.show(display)
             key = cv2.waitKey(1) & 0xFF
@@ -778,7 +916,8 @@ def run_live(ui_mode: str | None = None) -> int:
         if incomplete_recording is not None:
             LOGGER.info("recording_stopped_on_exit path=%s", incomplete_recording)
         key_sender.close()
-        space_sender.close()
+        if space_sender is not None:
+            space_sender.close()
         capture.close()
         hotkeys.close()
         cv2.destroyAllWindows()

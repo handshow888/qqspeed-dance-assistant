@@ -3,32 +3,30 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from .config import PROJECT_ROOT, load_config, resolve_ui_config
+from .config import PROJECT_ROOT, load_config, resolve_mode_config
 from .detector import ArrowDetector
 from .image_io import read_image, write_image
 
 
 def find_default_inputs(config: dict) -> list[Path]:
-    configured_templates = {
-        resolve_path
-        for paths in config["templates"].values()
-        for value in paths
-        if (resolve_path := (PROJECT_ROOT / value).resolve()).exists()
-    }
-    material_dirs = sorted({path.parent for path in configured_templates})
-    return sorted(
-        path
-        for directory in material_dirs
-        for path in directory.glob("*.png")
-        if path.resolve() not in configured_templates
-        and not path.stem.startswith("节奏条")
+    fixture_dir = (
+        PROJECT_ROOT
+        / "tests"
+        / "fixtures"
+        / str(config["game_mode"])
+        / str(config["ui_mode"])
     )
+    return sorted(fixture_dir.glob("*.png")) if fixture_dir.exists() else []
 
 
 def run_offline(
-    input_paths: list[Path] | None = None, ui_mode: str | None = None
+    input_paths: list[Path] | None = None,
+    game_mode: str | None = None,
+    ui_mode: str | None = None,
 ) -> int:
-    config = resolve_ui_config(load_config(), ui_mode)
+    config = resolve_mode_config(load_config(), game_mode, ui_mode)
+    if not config.get("implemented", False):
+        raise ValueError(str(config.get("unavailable_reason", "该模式尚不可用")))
     detector = ArrowDetector(config)
     paths = input_paths or find_default_inputs(config)
     output_dir = PROJECT_ROOT / "debug" / "offline"

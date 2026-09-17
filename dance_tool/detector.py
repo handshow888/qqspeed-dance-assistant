@@ -8,7 +8,7 @@ from typing import Iterable
 import cv2
 import numpy as np
 
-from .config import resolve_project_path, resolve_ui_config
+from .config import resolve_project_path
 from .image_io import read_image
 
 
@@ -157,7 +157,6 @@ def classify_appearance(image: np.ndarray, detection: Detection) -> str:
 
 class ArrowDetector:
     def __init__(self, config: dict):
-        config = resolve_ui_config(config)
         recognition = config["recognition"]
         self.threshold = float(recognition["match_threshold"])
         self.scales = [float(value) for value in recognition["scales"]]
@@ -254,7 +253,7 @@ class ArrowDetector:
                 cv2.FONT_HERSHEY_SIMPLEX,
                 0.52,
                 color,
-                2,
+                1,
                 cv2.LINE_AA,
             )
         return canvas

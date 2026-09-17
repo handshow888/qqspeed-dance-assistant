@@ -12,6 +12,7 @@ htmlcov/
 
 # Generated output and local runtime data
 /debug/
+/logs/
 /recordings/
 /build/
 /dist/
@@ -28,37 +29,5 @@ htmlcov/
 Thumbs.db
 Desktop.ini
 
-# Ignore all image material except files referenced by config.json.
-/图片素材/*
-!/图片素材/经典/
-!/图片素材/焕新/
-
-/图片素材/经典/*
-!/图片素材/经典/上箭头-未按下.png
-!/图片素材/经典/上箭头-已按下.png
-!/图片素材/经典/下箭头-未按下.png
-!/图片素材/经典/下箭头-已按下.png
-!/图片素材/经典/左箭头-未按下.png
-!/图片素材/经典/左箭头-已按下.png
-!/图片素材/经典/右箭头-未按下.png
-!/图片素材/经典/右箭头-已按下.png
-!/图片素材/经典/节奏条.png
-!/图片素材/经典/节奏条滑块.png
-!/图片素材/经典/节奏条光标.png
-!/图片素材/经典/节奏条光标2.png
-!/图片素材/经典/节奏条光标3.png
-
-/图片素材/焕新/*
-!/图片素材/焕新/上箭头-未按下.png
-!/图片素材/焕新/上箭头-已按下.png
-!/图片素材/焕新/下箭头-未按下.png
-!/图片素材/焕新/下箭头-已按下.png
-!/图片素材/焕新/左箭头-未按下.png
-!/图片素材/焕新/左箭头-已按下.png
-!/图片素材/焕新/右箭头-未按下.png
-!/图片素材/焕新/右箭头-已按下.png
-!/图片素材/焕新/节奏条.png
-!/图片素材/焕新/节奏条滑块.png
-!/图片素材/焕新/节奏条光标.png
-!/图片素材/焕新/节奏条光标2.png
-!/图片素材/焕新/节奏条光标3.png
+# Large local screenshots and videos used for calibration/regression.
+/tests/fixtures/

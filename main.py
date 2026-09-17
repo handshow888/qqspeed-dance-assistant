@@ -10,6 +10,11 @@ import traceback
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="QQ飞车舞蹈模式识别与按键 Demo")
     parser.add_argument(
+        "--game-mode",
+        choices=("traditional_four_key", "speed_dance", "couple_dance", "传统四键", "飞车舞蹈", "双人舞蹈"),
+        help="临时覆盖玩法模式",
+    )
+    parser.add_argument(
         "--ui-mode",
         choices=("classic", "renewed", "经典", "焕新"),
         help="临时覆盖 config.json 的 UI 模式（classic/经典 或 renewed/焕新）",
@@ -30,7 +35,11 @@ def main() -> int:
     if command == "offline":
         from dance_tool.offline import run_offline
 
-        return run_offline(args.images or None, ui_mode=args.ui_mode)
+        return run_offline(
+            args.images or None,
+            game_mode=args.game_mode,
+            ui_mode=args.ui_mode,
+        )
     if command == "calibrate":
         from dance_tool.live import calibrate_arrow_roi
 
@@ -38,17 +47,18 @@ def main() -> int:
     if command == "live":
         from dance_tool.live import run_live
 
-        return run_live(ui_mode=args.ui_mode)
+        return run_live(game_mode=args.game_mode, ui_mode=args.ui_mode)
     raise AssertionError(f"未知命令：{command}")
 
 
 def _report_startup_error(error: BaseException) -> None:
-    from dance_tool.config import PROJECT_ROOT
+    from dance_tool.config import create_log_path
 
-    log_path = PROJECT_ROOT / "debug" / "startup_error.log"
-    log_path.parent.mkdir(parents=True, exist_ok=True)
+    log_path = create_log_path()
     detail = "".join(traceback.format_exception(error))
-    log_path.write_text(detail, encoding="utf-8")
+    with log_path.open("a", encoding="utf-8") as file:
+        file.write("\nSTARTUP ERROR\n")
+        file.write(detail)
     message = f"程序启动失败：{error}\n\n详细信息已保存到：\n{log_path}"
     print(message, file=sys.stderr)
     if sys.platform == "win32":

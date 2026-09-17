@@ -10,7 +10,7 @@ import cv2
 import numpy as np
 
 from dance_tool import config as config_module
-from dance_tool.config import PROJECT_ROOT, load_config, resolve_ui_config
+from dance_tool.config import PROJECT_ROOT, load_config, resolve_mode_config
 from dance_tool.detector import ArrowDetector
 from dance_tool.hotkeys import parse_hotkey
 from dance_tool.image_io import read_image
@@ -24,6 +24,7 @@ from dance_tool.keyboard_input import (
 )
 from dance_tool.live import draw_status, space_expire_reason
 from dance_tool.recorder import RoiVideoRecorder
+from dance_tool.selector import ModeSelector
 from dance_tool.space_timing import RhythmBarTracker, SpaceTimingConfig
 from main import build_parser
 
@@ -32,9 +33,22 @@ class ArrowDetectorTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
         cls.saved_config = load_config()
-        cls.detector = ArrowDetector(resolve_ui_config(cls.saved_config, "renewed"))
-        cls.materials = PROJECT_ROOT / "图片素材" / "焕新"
-        cls.classic_config = resolve_ui_config(cls.saved_config, "classic")
+        cls.detector = ArrowDetector(
+            resolve_mode_config(cls.saved_config, "traditional_four_key", "renewed")
+        )
+        cls.materials = (
+            PROJECT_ROOT / "tests" / "fixtures" / "traditional_four_key" / "renewed"
+        )
+        cls.templates = (
+            PROJECT_ROOT
+            / "assets"
+            / "traditional_four_key"
+            / "renewed"
+            / "templates"
+        )
+        cls.classic_config = resolve_mode_config(
+            cls.saved_config, "traditional_four_key", "classic"
+        )
         cls.classic_detector = ArrowDetector(cls.classic_config)
 
     def assert_sequence(self, filename: str, expected: list[str]) -> None:
@@ -46,26 +60,29 @@ class ArrowDetectorTests(unittest.TestCase):
         args = build_parser().parse_args([])
         self.assertIsNone(args.command)
 
-    def test_ui_profiles_can_be_switched_without_changing_saved_mode(self) -> None:
-        classic = resolve_ui_config(self.saved_config, "经典")
-        renewed = resolve_ui_config(self.saved_config, "焕新")
+    def test_mode_profiles_can_be_switched_without_changing_saved_mode(self) -> None:
+        classic = resolve_mode_config(self.saved_config, "传统四键", "经典")
+        renewed = resolve_mode_config(self.saved_config, "传统四键", "焕新")
+        speed_dance = resolve_mode_config(self.saved_config, "飞车舞蹈", "经典")
+        self.assertEqual("traditional_four_key", classic["game_mode"])
         self.assertEqual("classic", classic["ui_mode"])
         self.assertEqual("renewed", renewed["ui_mode"])
-        self.assertEqual(
-            self.saved_config["ui_profiles"]["classic"]["recognition"][
-                "match_threshold"
-            ],
-            classic["recognition"]["match_threshold"],
-        )
-        self.assertEqual(
-            self.saved_config["ui_profiles"]["renewed"]["recognition"][
-                "match_threshold"
-            ],
-            renewed["recognition"]["match_threshold"],
-        )
-        self.assertIn("经典", classic["space"]["bar_template"])
-        self.assertIn("焕新", renewed["space"]["bar_template"])
+        self.assertEqual(0.35, classic["recognition"]["match_threshold"])
+        self.assertEqual(0.42, renewed["recognition"]["match_threshold"])
+        self.assertIn("classic", classic["space"]["bar_template"])
+        self.assertIn("renewed", renewed["space"]["bar_template"])
+        self.assertFalse(speed_dance["implemented"])
+        self.assertEqual("traditional_four_key", self.saved_config["game_mode"])
         self.assertEqual("classic", self.saved_config["ui_mode"])
+        for game_mode in ("traditional_four_key", "speed_dance", "couple_dance"):
+            for ui_mode in ("classic", "renewed"):
+                with self.subTest(game_mode=game_mode, ui_mode=ui_mode):
+                    profile = resolve_mode_config(
+                        self.saved_config, game_mode, ui_mode
+                    )
+                    self.assertEqual(game_mode, profile["game_mode"])
+                    self.assertEqual(ui_mode, profile["ui_mode"])
+                    self.assertIn("implemented", profile)
 
     def test_roi_recorder_writes_fixed_timeline(self) -> None:
         with TemporaryDirectory() as directory:
@@ -127,7 +144,7 @@ class ArrowDetectorTests(unittest.TestCase):
             ("RIGHT", "右箭头-已按下.png"),
         ):
             with self.subTest(direction=direction):
-                image = read_image(self.materials / filename)
+                image = read_image(self.templates / filename)
                 padded = cv2.copyMakeBorder(
                     image, 20, 20, 20, 20, cv2.BORDER_REPLICATE
                 )
@@ -150,7 +167,14 @@ class ArrowDetectorTests(unittest.TestCase):
         x, y, width, height = self.classic_config["arrow_roi"]
         for filename, sequence in expected.items():
             with self.subTest(filename=filename):
-                image = read_image(PROJECT_ROOT / "图片素材" / "经典" / filename)
+                image = read_image(
+                    PROJECT_ROOT
+                    / "tests"
+                    / "fixtures"
+                    / "traditional_four_key"
+                    / "classic"
+                    / filename
+                )
                 image_height, image_width = image.shape[:2]
                 crop = image[
                     round(image_height * y) : round(image_height * (y + height)),
@@ -180,7 +204,7 @@ class ArrowDetectorTests(unittest.TestCase):
                 self.assertEqual(expected, config_module.load_config())
 
     def test_status_header_does_not_cover_recognition_image(self) -> None:
-        image = read_image(self.materials / "左箭头-未按下.png")
+        image = read_image(self.templates / "左箭头-未按下.png")
         result = draw_status(
             image,
             "RUNNING",
@@ -194,8 +218,55 @@ class ArrowDetectorTests(unittest.TestCase):
             recording_status=None,
             display_scale=0.5,
         )
-        self.assertEqual(round(image.shape[0] * 0.5) + 138, result.shape[0])
+        self.assertEqual(round(image.shape[0] * 0.5) + 208, result.shape[0])
         self.assertEqual(round(image.shape[1] * 0.5), result.shape[1])
+
+    def test_mode_selector_only_accepts_clicks_while_stopped(self) -> None:
+        selector = ModeSelector()
+        canvas = np.zeros((208, 700, 3), dtype=np.uint8)
+        selector.draw(canvas, "STOPPED", "traditional_four_key", "classic")
+        speed_button = next(
+            button
+            for button in selector.buttons
+            if button.choice.value == "speed_dance"
+        )
+        selector.on_mouse(
+            cv2.EVENT_LBUTTONUP,
+            (speed_button.left + speed_button.right) // 2,
+            (speed_button.top + speed_button.bottom) // 2,
+            0,
+            None,
+        )
+        event = selector.poll()[0]
+        self.assertEqual("game_mode", event.kind)
+        self.assertEqual("speed_dance", event.value)
+
+        selector.draw(canvas, "STOPPED", "traditional_four_key", "classic")
+        renewed_button = next(
+            button
+            for button in selector.buttons
+            if button.choice.value == "renewed"
+        )
+        selector.on_mouse(
+            cv2.EVENT_LBUTTONUP,
+            (renewed_button.left + renewed_button.right) // 2,
+            (renewed_button.top + renewed_button.bottom) // 2,
+            0,
+            None,
+        )
+        event = selector.poll()[0]
+        self.assertEqual("ui_mode", event.kind)
+        self.assertEqual("renewed", event.value)
+
+        selector.draw(canvas, "RUNNING", "traditional_four_key", "classic")
+        selector.on_mouse(
+            cv2.EVENT_LBUTTONUP,
+            (speed_button.left + speed_button.right) // 2,
+            (speed_button.top + speed_button.bottom) // 2,
+            0,
+            None,
+        )
+        self.assertEqual("blocked", selector.poll()[0].kind)
 
     def test_reaction_delay_has_hard_110ms_floor(self) -> None:
         timing = InputTiming.from_config(
@@ -231,7 +302,9 @@ class ArrowDetectorTests(unittest.TestCase):
 
     def test_rhythm_tracker_predicts_centre_crossing(self) -> None:
         timing = SpaceTimingConfig.from_config(
-            resolve_ui_config(self.saved_config, "renewed")["space"]
+            resolve_mode_config(
+                self.saved_config, "traditional_four_key", "renewed"
+            )["space"]
         )
         tracker = RhythmBarTracker(timing)
         observation = None
@@ -257,7 +330,9 @@ class ArrowDetectorTests(unittest.TestCase):
         if not path.exists():
             self.skipTest("标准节奏条录像不存在")
         video = cv2.VideoCapture(str(path))
-        renewed = resolve_ui_config(self.saved_config, "renewed")
+        renewed = resolve_mode_config(
+            self.saved_config, "traditional_four_key", "renewed"
+        )
         tracker = RhythmBarTracker(SpaceTimingConfig.from_config(renewed["space"]))
         observation = None
         try:

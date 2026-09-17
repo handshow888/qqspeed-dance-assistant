@@ -2,7 +2,7 @@
 
 当前 Demo 实现四项功能：
 
-1. 对 `图片素材` 中的截图进行离线箭头识别。
+1. 对 `tests/fixtures` 中的截图进行离线箭头识别。
 2. 实时截取屏幕指定区域并显示识别框。
 3. 箭头序列稳定后，按照可配置的随机时间模拟方向键输入。
 4. 追踪节奏条滑块，在判定区中心附近按正态分布模拟空格输入。
@@ -22,12 +22,12 @@ D:\Pyhton\python3.10.7\python.exe -m venv .venv
 .\.venv\Scripts\python.exe main.py offline
 ```
 
-默认识别 `图片素材` 中除箭头模板外的 PNG。标注图片和 JSON 汇总保存在 `debug/offline`。
+默认识别当前玩法和 UI 对应的 `tests/fixtures` 样本。标注图片和 JSON 汇总保存在 `debug/offline`。
 
 也可以指定图片：
 
 ```powershell
-.\.venv\Scripts\python.exe main.py offline "图片素材\某张截图.png"
+.\.venv\Scripts\python.exe main.py offline "tests\fixtures\某张截图.png"
 ```
 
 ## 实时观察
@@ -46,25 +46,27 @@ D:\Pyhton\python3.10.7\python.exe -m venv .venv
 
 不加参数时默认进入 `live` 实时模式；显式执行 `main.py live` 的效果相同。
 
-## 经典／焕新 UI 切换
+双击 `start.vbs` 可以静默启动，只显示识别窗口，不显示 Python 控制台。`start.bat` 也已改用 `pythonw.exe`，但双击批处理时可能短暂闪过启动窗口。
 
-`config.json` 顶部的 `ui_mode` 控制所用素材和识别参数：
+## 玩法与 UI 在线切换
 
-```json
-"ui_mode": "classic"
-```
+观察窗口顶部提供两行鼠标选项：
 
-- `classic`：经典 UI，当前默认模式；方向键阈值为 `0.35`。
-- `renewed`：焕新 UI，保留原方向键与节奏条参数。
+- 玩法：传统四键、飞车舞蹈、双人舞蹈
+- UI：经典、焕新
 
-也可以只为本次启动临时覆盖，而不修改配置文件：
+只有识别状态为 `STOPPED` 时可以切换。运行或暂停时点击选项不会切换，并提示先停止识别。切换成功后立即保存到 `config.json`，不需要关闭程序。
+
+当前版本已有“传统四键 × 经典/焕新”的完整识别素材。飞车舞蹈和双人舞蹈的选择入口与独立配置已建立，但在对应素材和规则补齐前不会允许启动识别。
+
+也可以只为本次启动临时覆盖初始选项：
 
 ```powershell
-.\.venv\Scripts\python.exe main.py --ui-mode classic
-.\.venv\Scripts\python.exe main.py --ui-mode renewed
+.\.venv\Scripts\python.exe main.py --game-mode traditional_four_key --ui-mode classic
+.\.venv\Scripts\python.exe main.py --game-mode traditional_four_key --ui-mode renewed
 ```
 
-两套设置都保存在 `ui_profiles` 中。公共的输入时序、快捷键、ROI 和窗口设置仍只保存一份；切换 UI 不会清除已经框选的 ROI。
+公共设置保存在 `config.json`；六种组合的识别配置位于 `configs/modes/<玩法>/<UI>.json`；正式模板位于 `assets/<玩法>/<UI>/templates`。
 
 快捷键：
 
@@ -137,12 +139,12 @@ D:\Pyhton\python3.10.7\python.exe -m venv .venv
 ```json
 "space": {
   "enabled": true,
-  "bar_template": "图片素材/经典/节奏条.png",
-  "slider_templates": ["图片素材/经典/节奏条滑块.png"],
+  "bar_template": "assets/traditional_four_key/classic/templates/节奏条.png",
+  "slider_templates": ["assets/traditional_four_key/classic/templates/节奏条滑块.png"],
   "cursor_templates": [
-    "图片素材/经典/节奏条光标.png",
-    "图片素材/经典/节奏条光标2.png",
-    "图片素材/经典/节奏条光标3.png"
+    "assets/traditional_four_key/classic/templates/节奏条光标.png",
+    "assets/traditional_four_key/classic/templates/节奏条光标2.png",
+    "assets/traditional_four_key/classic/templates/节奏条光标3.png"
   ],
   "bar_search_roi_in_arrow_roi": [0.08, 0.0, 0.84, 0.45],
   "bar_width_ratio": 0.541,
@@ -178,7 +180,7 @@ D:\Pyhton\python3.10.7\python.exe -m venv .venv
 
 默认参数为均值 `0 ms`、标准差 `8 ms`、最大偏差 `25 ms`。如实机反馈整体偏早或偏晚，只调整 `mean_offset_ms` 即可，例如 `8` 表示整体晚 8 ms，`-8` 表示整体早 8 ms。
 
-运行诊断记录保存在 `debug/runtime.log`。如果识别成功但游戏没有收到方向键，请保留游戏和程序运行状态，并检查日志中的 `target_bound`、`input_started`、`input_completed` 或 `input_error`。
+运行诊断记录保存在 `logs` 文件夹，每次运行生成一个形如 `2026-09-17_14-30-12-123.log` 的独立文件，自动保留最近30次日志。如果识别成功但游戏没有收到方向键，请保留游戏和程序运行状态，并检查最新日志中的 `target_bound`、`input_started`、`input_completed` 或 `input_error`。
 
 ## 当前边界
 

@@ -72,17 +72,17 @@ class SpaceTimingConfig:
         )
         return cls(
             enabled=bool(config.get("enabled", True)),
-            bar_template_path=str(config.get("bar_template", "图片素材/节奏条.png")),
+            bar_template_path=str(config.get("bar_template", "assets/节奏条.png")),
             slider_template_paths=_string_tuple(
-                config, "slider_templates", ["图片素材/节奏条滑块.png"]
+                config, "slider_templates", ["assets/节奏条滑块.png"]
             ),
             cursor_template_paths=_string_tuple(
                 config,
                 "cursor_templates",
                 [
-                    "图片素材/节奏条光标.png",
-                    "图片素材/节奏条光标2.png",
-                    "图片素材/节奏条光标3.png",
+                    "assets/节奏条光标.png",
+                    "assets/节奏条光标2.png",
+                    "assets/节奏条光标3.png",
                 ],
             ),
             bar_search_roi=_relative_roi(
