@@ -23,7 +23,7 @@ from dance_tool.keyboard_input import (
     SpaceKeySender,
     is_admin,
 )
-from dance_tool.live import draw_status, space_expire_reason
+from dance_tool.live import draw_status, frame_limit_delay, space_expire_reason
 from dance_tool.recorder import RoiVideoRecorder
 from dance_tool.selector import ModeSelector
 from dance_tool.space_timing import RhythmBarTracker, SpaceTimingConfig
@@ -67,6 +67,15 @@ class ArrowDetectorTests(unittest.TestCase):
     def test_no_command_defaults_to_live_at_dispatch(self) -> None:
         args = build_parser().parse_args([])
         self.assertIsNone(args.command)
+
+    def test_live_frame_limit_defaults_to_sixty_fps_period(self) -> None:
+        self.assertAlmostEqual(
+            1 / 60 - 0.005,
+            frame_limit_delay(10.0, 60.0, now=10.005),
+            places=6,
+        )
+        self.assertEqual(0.0, frame_limit_delay(10.0, 60.0, now=10.020))
+        self.assertEqual(0.0, frame_limit_delay(10.0, 0.0, now=10.005))
 
     def test_train_command_defaults_are_for_small_arrow_dataset(self) -> None:
         args = build_parser().parse_args(["train"])

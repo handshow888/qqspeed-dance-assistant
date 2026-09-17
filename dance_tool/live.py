@@ -49,6 +49,19 @@ def space_expire_reason(
     return None
 
 
+def frame_limit_delay(
+    frame_started_at: float,
+    maximum_fps: float,
+    now: float | None = None,
+) -> float:
+    """Return the remaining delay needed to keep the live loop under its FPS cap."""
+    if maximum_fps <= 0:
+        return 0.0
+    current = time.perf_counter() if now is None else now
+    target_period = 1.0 / maximum_fps
+    return max(0.0, target_period - (current - frame_started_at))
+
+
 def configure_runtime_logging() -> None:
     log_path = create_log_path()
     handler = logging.FileHandler(log_path, encoding="utf-8")
@@ -360,9 +373,13 @@ def run_live(
             detector = yolo_detector
     recorder = RoiVideoRecorder(config.get("recording", {}))
     dataset_collector = YoloDatasetCollector(config.get("dataset", {}))
+    window_config = config.setdefault(
+        "window", {"scale": 0.55, "always_on_top": False}
+    )
+    maximum_fps = max(0.0, float(window_config.get("max_fps", 60)))
     LOGGER.info(
         "live_start game_mode=%s ui_mode=%s implemented=%s admin=%s input_enabled=%s "
-        "reaction=%d-%d hold=%d-%d interval=%d-%d",
+        "reaction=%d-%d hold=%d-%d interval=%d-%d max_fps=%g",
         config["game_mode"],
         config["ui_mode"],
         config.get("implemented", False),
@@ -374,8 +391,8 @@ def run_live(
         input_timing.key_hold_max_ms,
         input_timing.inter_key_min_ms,
         input_timing.inter_key_max_ms,
+        maximum_fps,
     )
-    window_config = config.setdefault("window", {"scale": 0.55, "always_on_top": False})
     selector = ModeSelector()
     preview = PreviewWindow(
         scale=float(window_config.get("scale", 0.55)),
@@ -391,6 +408,7 @@ def run_live(
     last_frame: np.ndarray | None = None
     status_message: str | None = yolo_startup_error
     frame_times: deque[float] = deque(maxlen=30)
+    previous_frame_started_at: float | None = None
     target_hwnd = 0
     target_title = ""
     round_armed = True
@@ -480,6 +498,12 @@ def run_live(
     region = relative_roi_to_region(capture.width, capture.height, config["arrow_roi"])
     try:
         while True:
+            frame_started_at = time.perf_counter()
+            if previous_frame_started_at is not None:
+                frame_times.append(
+                    max(frame_started_at - previous_frame_started_at, 1e-6)
+                )
+            previous_frame_started_at = frame_started_at
             for selection in selector.poll():
                 if selection.kind == "dataset_toggle":
                     enable_dataset = selection.value == "true"
@@ -756,7 +780,6 @@ def run_live(
                     status_message = str(payload)
                     LOGGER.error("space_error detail=%s", payload)
 
-            started = time.perf_counter()
             if state == "RUNNING" or recorder.active or record_requested or last_frame is None:
                 frame = capture.grab(region)
                 last_frame = frame
@@ -1054,9 +1077,11 @@ def run_live(
                     status_message = f"Dataset saving disabled: {error}"
                     LOGGER.exception("dataset_sample_save_failed")
 
-            elapsed = max(time.perf_counter() - started, 1e-6)
-            frame_times.append(elapsed)
-            fps = len(frame_times) / max(sum(frame_times), 1e-6)
+            fps = (
+                len(frame_times) / max(sum(frame_times), 1e-6)
+                if frame_times
+                else 0.0
+            )
             stable_count = sum(1 for item in history if item == (history[-1] if history else ()))
             recording_status = None
             if recorder.active:
@@ -1088,6 +1113,9 @@ def run_live(
                 break
             if cv2.getWindowProperty(WINDOW_NAME, cv2.WND_PROP_VISIBLE) < 1:
                 break
+            delay = frame_limit_delay(frame_started_at, maximum_fps)
+            if delay > 0:
+                time.sleep(delay)
     finally:
         LOGGER.info("live_stop")
         incomplete_recording = recorder.stop()
