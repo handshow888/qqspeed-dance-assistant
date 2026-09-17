@@ -58,6 +58,8 @@ D:\Pyhton\python3.10.7\python.exe -m venv .venv
 
 只有识别状态为 `STOPPED` 时可以切换。运行或暂停时点击选项不会切换，并提示先停止识别。切换成功后立即保存到 `config.json`，不需要关闭程序。
 
+第三行的 `DATA: RECORD ON/OFF` 是数据集录制开关。它可以在停止、运行或暂停状态下直接用鼠标点击，并会立即写入 `config.json`。开启后仍然只在识别运行期间、符合下文事件触发条件时保存样本；关闭后不再保存新样本。
+
 当前版本已有“传统四键 × 经典/焕新”的完整识别素材。飞车舞蹈和双人舞蹈的选择入口与独立配置已建立，但在对应素材和规则补齐前不会允许启动识别。
 
 也可以只为本次启动临时覆盖初始选项：
@@ -142,6 +144,36 @@ datasets/yolo_arrows/
 - 采集训练集时保持 `split` 为 `train`。请使用另一段独立录屏或游戏场次，将 `split` 改为 `val` 后采集验证集，避免相邻帧同时进入训练集和验证集。
 - `datasets` 已加入 `.gitignore`，本地采集的大图片不会误提交到仓库。
 - 模板检测框适合作为初始伪标签，但正式训练前仍应抽样检查图片与同名 `.txt`，修正漏框、错框和错误的按下状态。仅使用少量模板图片本身不足以训练出能适应窗口缩放的模型，主要训练数据应来自这里保存的真实 ROI。
+
+## 训练 YOLO 箭头模型
+
+训练依赖单独安装，不影响现有 OpenCV 识别环境：
+
+```powershell
+.\.venv\Scripts\python.exe -m pip install -r requirements-train.txt
+```
+
+确认 `config.json` 中的数据集开关已关闭，且 `datasets/yolo_arrows` 下已经分别有 `train` 和 `val` 数据后开始训练：
+
+```powershell
+.\.venv\Scripts\python.exe main.py train
+```
+
+程序会先检查 8 类名称、图片与标签是否配对，以及 YOLO 坐标是否合法，再使用 `yolo26n.pt` 进行迁移学习。默认配置针对当前小数据集：`80` 轮、输入尺寸 `640`、批大小 `8`、早停等待 `15` 轮，并关闭会改变箭头方向语义的水平和垂直翻转增强。
+
+当前电脑的 RTX 3060 Laptop GPU 训练这批 `173` 张训练图和 `63` 张验证图，预计纯训练约 `3～10` 分钟；首次下载模型、建立缓存和 CUDA 初始化会额外耗时，笔记本处于省电或温度较高时可能到 `10～20` 分钟。第一次训练完成后的最佳权重默认位于：
+
+```text
+runs/yolo_arrow/yolo26n_arrows/weights/best.pt
+```
+
+重复训练时 Ultralytics 会为结果目录自动追加编号；程序结束时会打印本次实际目录和 `best.pt` 路径。
+
+如需调整，可使用例如：
+
+```powershell
+.\.venv\Scripts\python.exe main.py train --epochs 120 --batch 8 --device 0
+```
 
 ## 方向键输入时序
 

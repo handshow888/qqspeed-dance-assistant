@@ -37,6 +37,7 @@ class ModeSelector:
         self.enabled = True
         self.game_mode = "traditional_four_key"
         self.ui_mode = "classic"
+        self.dataset_enabled = False
 
     def draw(
         self,
@@ -44,15 +45,57 @@ class ModeSelector:
         state: str,
         game_mode: str,
         ui_mode: str,
+        dataset_enabled: bool = False,
     ) -> None:
         self.enabled = state == "STOPPED"
         self.game_mode = game_mode
         self.ui_mode = ui_mode
+        self.dataset_enabled = bool(dataset_enabled)
         self.buttons = []
         if canvas.shape[1] < 430:
             return
         self._draw_row(canvas, "GAME", "game_mode", GAME_MODES, 116, game_mode)
         self._draw_row(canvas, "UI", "ui_mode", UI_MODES, 151, ui_mode)
+        self._draw_dataset_toggle(canvas, 186)
+
+    def _draw_dataset_toggle(self, canvas: np.ndarray, top: int) -> None:
+        left = 66
+        right = min(canvas.shape[1] - 6, left + 180)
+        choice = Choice("toggle", "数据集录制", "ON" if self.dataset_enabled else "OFF")
+        self.buttons.append(
+            Button("dataset_toggle", choice, left, top, right, top + 29)
+        )
+        fill = (45, 110, 55) if self.dataset_enabled else (55, 55, 65)
+        border = (80, 235, 105) if self.dataset_enabled else (135, 135, 155)
+        cv2.putText(
+            canvas,
+            "DATA:",
+            (10, top + 21),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.45,
+            (205, 205, 205),
+            1,
+            cv2.LINE_AA,
+        )
+        cv2.rectangle(canvas, (left, top), (right, top + 29), fill, -1)
+        cv2.rectangle(canvas, (left, top), (right, top + 29), border, 1)
+        text = f"RECORD {choice.display}"
+        (text_width, text_height), _ = cv2.getTextSize(
+            text, cv2.FONT_HERSHEY_SIMPLEX, 0.43, 1
+        )
+        cv2.putText(
+            canvas,
+            text,
+            (
+                left + max(4, (right - left - text_width) // 2),
+                top + 18 + text_height // 3,
+            ),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.43,
+            (245, 255, 245),
+            1,
+            cv2.LINE_AA,
+        )
 
     def _draw_row(
         self,
@@ -103,7 +146,10 @@ class ModeSelector:
             cv2.putText(
                 canvas,
                 choice.display,
-                (left + max(4, (right - left - text_width) // 2), top + 18 + text_height // 3),
+                (
+                    left + max(4, (right - left - text_width) // 2),
+                    top + 18 + text_height // 3,
+                ),
                 cv2.FONT_HERSHEY_SIMPLEX,
                 0.43,
                 text_color,
@@ -117,6 +163,14 @@ class ModeSelector:
             return
         button = next((item for item in self.buttons if item.contains(x, y)), None)
         if button is None:
+            return
+        if button.kind == "dataset_toggle":
+            self.events.put(
+                SelectorEvent(
+                    "dataset_toggle",
+                    "false" if self.dataset_enabled else "true",
+                )
+            )
             return
         if not self.enabled:
             self.events.put(SelectorEvent("blocked"))

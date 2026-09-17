@@ -15,6 +15,7 @@ htmlcov/
 /logs/
 /recordings/
 /datasets/
+/runs/
 /build/
 /dist/
 *.egg-info/

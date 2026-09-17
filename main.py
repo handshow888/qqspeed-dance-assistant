@@ -26,6 +26,17 @@ def build_parser() -> argparse.ArgumentParser:
 
     subparsers.add_parser("calibrate", help="框选并保存实时箭头识别区域")
     subparsers.add_parser("live", help="实时截屏并观察识别结果")
+    train = subparsers.add_parser("train", help="使用 YOLO26n 训练箭头检测模型")
+    train.add_argument("--dataset-root", type=Path, help="数据集根目录")
+    train.add_argument("--model", default="yolo26n.pt", help="预训练模型")
+    train.add_argument("--epochs", type=int, default=80, help="最大训练轮数")
+    train.add_argument("--imgsz", type=int, default=640, help="训练输入尺寸")
+    train.add_argument("--batch", type=int, default=8, help="批大小")
+    train.add_argument("--patience", type=int, default=15, help="早停等待轮数")
+    train.add_argument("--device", default="0", help="CUDA 设备编号或 cpu")
+    train.add_argument("--workers", type=int, default=4, help="数据加载进程数")
+    train.add_argument("--output-dir", type=Path, help="训练结果目录")
+    train.add_argument("--name", default="yolo26n_arrows", help="本次训练名称")
     return parser
 
 
@@ -48,6 +59,21 @@ def main() -> int:
         from dance_tool.live import run_live
 
         return run_live(game_mode=args.game_mode, ui_mode=args.ui_mode)
+    if command == "train":
+        from dance_tool.train_yolo import run_training
+
+        return run_training(
+            dataset_root=args.dataset_root,
+            model_name=args.model,
+            epochs=args.epochs,
+            image_size=args.imgsz,
+            batch_size=args.batch,
+            patience=args.patience,
+            device=args.device,
+            workers=args.workers,
+            output_dir=args.output_dir,
+            run_name=args.name,
+        )
     raise AssertionError(f"未知命令：{command}")
 
 

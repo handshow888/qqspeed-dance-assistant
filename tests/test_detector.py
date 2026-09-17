@@ -27,6 +27,7 @@ from dance_tool.live import draw_status, space_expire_reason
 from dance_tool.recorder import RoiVideoRecorder
 from dance_tool.selector import ModeSelector
 from dance_tool.space_timing import RhythmBarTracker, SpaceTimingConfig
+from dance_tool.train_yolo import validate_dataset, write_training_yaml
 from dance_tool.yolo_dataset import (
     CLASS_NAMES,
     YoloDatasetCollector,
@@ -65,6 +66,15 @@ class ArrowDetectorTests(unittest.TestCase):
     def test_no_command_defaults_to_live_at_dispatch(self) -> None:
         args = build_parser().parse_args([])
         self.assertIsNone(args.command)
+
+    def test_train_command_defaults_are_for_small_arrow_dataset(self) -> None:
+        args = build_parser().parse_args(["train"])
+        self.assertEqual("train", args.command)
+        self.assertEqual("yolo26n.pt", args.model)
+        self.assertEqual(80, args.epochs)
+        self.assertEqual(640, args.imgsz)
+        self.assertEqual(8, args.batch)
+        self.assertEqual("0", args.device)
 
     def test_mode_profiles_can_be_switched_without_changing_saved_mode(self) -> None:
         classic = resolve_mode_config(self.saved_config, "传统四键", "经典")
@@ -236,6 +246,38 @@ class ArrowDetectorTests(unittest.TestCase):
             self.assertEqual(1, len(empty_labels))
             self.assertIn("bar_detected+space_pressed", empty_labels[0].name)
 
+    def test_training_dataset_validation_and_yaml_generation(self) -> None:
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "classes.txt").write_text(
+                "\n".join(CLASS_NAMES) + "\n", encoding="utf-8"
+            )
+            for split in ("train", "val"):
+                image_dir = (
+                    root / "images" / split / "traditional_four_key" / "classic"
+                )
+                label_dir = (
+                    root / "labels" / split / "traditional_four_key" / "classic"
+                )
+                image_dir.mkdir(parents=True)
+                label_dir.mkdir(parents=True)
+                cv2.imwrite(
+                    str(image_dir / "sample.png"),
+                    np.zeros((32, 64, 3), dtype=np.uint8),
+                )
+                (label_dir / "sample.txt").write_text(
+                    "0 0.500000 0.500000 0.250000 0.500000\n",
+                    encoding="utf-8",
+                )
+
+            summary = validate_dataset(root)
+            self.assertEqual(1, summary["train"].images)
+            self.assertEqual(1, summary["val"].boxes)
+            yaml_path = write_training_yaml(root)
+            yaml_text = yaml_path.read_text(encoding="utf-8")
+            self.assertIn("train: images/train", yaml_text)
+            self.assertIn("7: right_pressed", yaml_text)
+
     def test_classic_full_screenshots_keep_low_confidence_arrows(self) -> None:
         expected = {
             "Snipaste_2026-09-10_15-17-53.png": ["LEFT"],
@@ -301,12 +343,12 @@ class ArrowDetectorTests(unittest.TestCase):
             recording_status=None,
             display_scale=0.5,
         )
-        self.assertEqual(round(image.shape[0] * 0.5) + 208, result.shape[0])
+        self.assertEqual(round(image.shape[0] * 0.5) + 243, result.shape[0])
         self.assertEqual(round(image.shape[1] * 0.5), result.shape[1])
 
     def test_mode_selector_only_accepts_clicks_while_stopped(self) -> None:
         selector = ModeSelector()
-        canvas = np.zeros((208, 700, 3), dtype=np.uint8)
+        canvas = np.zeros((243, 700, 3), dtype=np.uint8)
         selector.draw(canvas, "STOPPED", "traditional_four_key", "classic")
         speed_button = next(
             button
@@ -350,6 +392,46 @@ class ArrowDetectorTests(unittest.TestCase):
             None,
         )
         self.assertEqual("blocked", selector.poll()[0].kind)
+
+    def test_dataset_toggle_accepts_mouse_click_while_running(self) -> None:
+        selector = ModeSelector()
+        canvas = np.zeros((243, 700, 3), dtype=np.uint8)
+        selector.draw(
+            canvas,
+            "RUNNING",
+            "traditional_four_key",
+            "classic",
+            dataset_enabled=False,
+        )
+        toggle = next(
+            button for button in selector.buttons if button.kind == "dataset_toggle"
+        )
+        selector.on_mouse(
+            cv2.EVENT_LBUTTONUP,
+            (toggle.left + toggle.right) // 2,
+            (toggle.top + toggle.bottom) // 2,
+            0,
+            None,
+        )
+        event = selector.poll()[0]
+        self.assertEqual("dataset_toggle", event.kind)
+        self.assertEqual("true", event.value)
+
+        selector.draw(
+            canvas,
+            "PAUSED",
+            "traditional_four_key",
+            "classic",
+            dataset_enabled=True,
+        )
+        selector.on_mouse(
+            cv2.EVENT_LBUTTONUP,
+            (toggle.left + toggle.right) // 2,
+            (toggle.top + toggle.bottom) // 2,
+            0,
+            None,
+        )
+        self.assertEqual("false", selector.poll()[0].value)
 
     def test_reaction_delay_has_hard_110ms_floor(self) -> None:
         timing = InputTiming.from_config(

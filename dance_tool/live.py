@@ -191,6 +191,7 @@ def draw_status(
     ui_mode: str = "",
     game_mode: str = "",
     selector: ModeSelector | None = None,
+    dataset_enabled: bool = False,
 ) -> np.ndarray:
     scale = min(max(float(display_scale), 0.2), 1.0)
     display_width = max(1, round(frame.shape[1] * scale))
@@ -200,7 +201,7 @@ def draw_status(
 
     # This header is added after image scaling, so its text remains at a fixed,
     # readable pixel size even when the recognition image is displayed at 55%.
-    header_height = 208
+    header_height = 243
     canvas = np.zeros(
         (scaled_frame.shape[0] + header_height, scaled_frame.shape[1], 3),
         dtype=np.uint8,
@@ -250,14 +251,14 @@ def draw_status(
         cv2.LINE_AA,
     )
     if selector is not None:
-        selector.draw(canvas, state, game_mode, ui_mode)
+        selector.draw(canvas, state, game_mode, ui_mode, dataset_enabled)
 
     footer = recording_status or message or "Ctrl+F12 Start/Stop ROI recording"
     if footer:
         cv2.putText(
             canvas,
             footer[:80],
-            (12, 201),
+            (12, 236),
             cv2.FONT_HERSHEY_SIMPLEX,
             0.46,
             (80, 180, 255),
@@ -446,6 +447,33 @@ def run_live(
     try:
         while True:
             for selection in selector.poll():
+                if selection.kind == "dataset_toggle":
+                    enable_dataset = selection.value == "true"
+                    dataset_settings = saved_config.setdefault("dataset", {})
+                    dataset_settings["enabled"] = enable_dataset
+                    config.setdefault("dataset", {})["enabled"] = enable_dataset
+                    if enable_dataset:
+                        try:
+                            dataset_collector = YoloDatasetCollector(dataset_settings)
+                        except (OSError, ValueError) as error:
+                            dataset_settings["enabled"] = False
+                            config["dataset"]["enabled"] = False
+                            status_message = f"Dataset recording failed: {error}"
+                            LOGGER.exception("dataset_recording_enable_failed")
+                        else:
+                            status_message = (
+                                f"Dataset recording ON ({dataset_collector.split})"
+                            )
+                            LOGGER.info(
+                                "dataset_recording_toggled enabled=true split=%s",
+                                dataset_collector.split,
+                            )
+                    else:
+                        dataset_collector.disable()
+                        status_message = "Dataset recording OFF"
+                        LOGGER.info("dataset_recording_toggled enabled=false")
+                    save_config(saved_config)
+                    continue
                 if selection.kind == "blocked" or state != "STOPPED":
                     status_message = "Stop recognition before switching mode"
                     continue
@@ -920,6 +948,9 @@ def run_live(
                         )
                 except Exception as error:
                     dataset_collector.disable()
+                    saved_config.setdefault("dataset", {})["enabled"] = False
+                    config.setdefault("dataset", {})["enabled"] = False
+                    save_config(saved_config)
                     status_message = f"Dataset saving disabled: {error}"
                     LOGGER.exception("dataset_sample_save_failed")
 
@@ -948,6 +979,7 @@ def run_live(
                 config["ui_mode"],
                 config["game_mode"],
                 selector,
+                dataset_collector.enabled,
             )
             preview.show(display)
             key = cv2.waitKey(1) & 0xFF
