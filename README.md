@@ -147,10 +147,16 @@ datasets/yolo_arrows/
 
 ## 训练 YOLO 箭头模型
 
-训练依赖单独安装，不影响现有 OpenCV 识别环境：
+训练依赖单独安装，不影响现有 OpenCV 识别环境。依赖文件会从 PyTorch 官方 CUDA 13.0 软件源安装 GPU 版本；不要只执行 `pip install ultralytics`，否则可能安装 CPU 版 PyTorch：
 
 ```powershell
 .\.venv\Scripts\python.exe -m pip install -r requirements-train.txt
+```
+
+如果此前已经装成版本号带 `+cpu` 的 PyTorch，执行一次强制替换：
+
+```powershell
+.\.venv\Scripts\python.exe -m pip install --upgrade --force-reinstall -r requirements-train.txt
 ```
 
 确认 `config.json` 中的数据集开关已关闭，且 `datasets/yolo_arrows` 下已经分别有 `train` 和 `val` 数据后开始训练：

@@ -169,7 +169,16 @@ def run_training(
         ) from error
 
     if device != "cpu" and not torch.cuda.is_available():
-        raise RuntimeError("未检测到可用的 CUDA，请检查 PyTorch CUDA 版本或使用 --device cpu")
+        if torch.version.cuda is None:
+            raise RuntimeError(
+                f"当前安装的是 CPU 版 PyTorch（{torch.__version__}）。请重新运行："
+                r".\.venv\Scripts\python.exe -m pip install --upgrade "
+                r"--force-reinstall -r requirements-train.txt"
+            )
+        raise RuntimeError(
+            f"PyTorch 已包含 CUDA {torch.version.cuda}，但无法连接显卡；"
+            "请检查 NVIDIA 驱动"
+        )
     if device != "cpu":
         print(f"CUDA：{torch.cuda.get_device_name(0)}")
 
