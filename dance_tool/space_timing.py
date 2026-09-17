@@ -41,6 +41,8 @@ class SpaceTimingConfig:
     slider_match_threshold: float
     cursor_match_threshold: float
     bar_vertical_padding: float
+    bar_low_pass_alpha: float
+    cursor_bar_ratio: float
     cursor_prior_ratio: float
     cursor_search_radius_ratio: float
     mean_offset_ms: float
@@ -104,6 +106,21 @@ class SpaceTimingConfig:
             ),
             bar_vertical_padding=max(
                 0.0, float(config.get("bar_vertical_padding", 0.24))
+            ),
+            bar_low_pass_alpha=min(
+                1.0, max(0.001, float(config.get("bar_low_pass_alpha", 0.01)))
+            ),
+            cursor_bar_ratio=min(
+                0.98,
+                max(
+                    0.02,
+                    float(
+                        config.get(
+                            "cursor_bar_ratio",
+                            config.get("cursor_prior_ratio", 0.85),
+                        )
+                    ),
+                ),
             ),
             cursor_prior_ratio=min(
                 0.95, max(0.05, float(config.get("cursor_prior_ratio", 0.85)))
@@ -180,6 +197,7 @@ class RhythmBarTracker:
         self._samples: deque[tuple[float, float]] = deque(maxlen=10)
         self._bar_candidates: deque[tuple[int, int, int, int, float]] = deque(maxlen=4)
         self._bar_box: tuple[int, int, int, int] | None = None
+        self._filtered_bar_box: tuple[float, float, float, float] | None = None
         self._bar_scale: float | None = None
         self._bar_locked = False
         self._bar_match_score: float | None = None
@@ -209,6 +227,7 @@ class RhythmBarTracker:
         if not keep_target:
             self._bar_candidates.clear()
             self._bar_box = None
+            self._filtered_bar_box = None
             self._bar_scale = None
             self._bar_locked = False
             self._bar_match_score = None
@@ -218,8 +237,23 @@ class RhythmBarTracker:
             self._cursor_match_score = None
             self._learned_speed = None
 
-    def observe(self, frame: np.ndarray, captured_at: float) -> RhythmObservation:
-        located = self._locate_bar(frame)
+    def observe(
+        self,
+        frame: np.ndarray,
+        captured_at: float,
+        *,
+        detected_bar_rect: tuple[int, int, int, int] | None = None,
+        detected_bar_score: float | None = None,
+        detected_slider_rect: tuple[int, int, int, int] | None = None,
+        detected_slider_score: float | None = None,
+        allow_template_fallback: bool = True,
+    ) -> RhythmObservation:
+        located = self._locate_bar(
+            frame,
+            detected_rect=detected_bar_rect,
+            detected_score=detected_bar_score,
+            allow_template_fallback=allow_template_fallback,
+        )
         if located is None:
             return self._observation(None, None, None, None, False, (0, 0, 0, 0))
 
@@ -227,7 +261,14 @@ class RhythmBarTracker:
         left, top, right, bottom = bar_rect
         crop = frame[top:bottom, left:right]
 
-        target = self._find_cursor(crop, left, bar_scale)
+        target = None
+        if detected_bar_rect is not None:
+            self._target_x = left + (right - left) * self.timing.cursor_bar_ratio
+            self._target_samples.clear()
+            self._target_locked = True
+            self._cursor_match_score = None
+        elif allow_template_fallback:
+            target = self._find_cursor(crop, left, bar_scale)
         if target is not None and not self._target_locked:
             target_x, score = target
             self._cursor_match_score = score
@@ -242,7 +283,14 @@ class RhythmBarTracker:
                     max(self._target_samples) - min(self._target_samples) <= 8
                 )
 
-        marker = self._find_slider(crop, left, bar_scale)
+        marker = self._marker_from_detection(
+            detected_slider_rect,
+            detected_slider_score,
+            left,
+            right,
+        )
+        if marker is None and allow_template_fallback:
+            marker = self._find_slider(crop, left, bar_scale)
         marker_x = marker[0] if marker is not None else None
         slider_score = marker[1] if marker is not None else None
         marker_advanced = False
@@ -335,10 +383,37 @@ class RhythmBarTracker:
         return frame
 
     def _locate_bar(
-        self, frame: np.ndarray
+        self,
+        frame: np.ndarray,
+        *,
+        detected_rect: tuple[int, int, int, int] | None = None,
+        detected_score: float | None = None,
+        allow_template_fallback: bool = True,
     ) -> tuple[tuple[int, int, int, int], float] | None:
+        if detected_rect is not None:
+            height, width = frame.shape[:2]
+            left, top, right, bottom = detected_rect
+            box = (
+                min(max(0, int(left)), width),
+                min(max(0, int(top)), height),
+                min(max(0, int(right)), width),
+                min(max(0, int(bottom)), height),
+            )
+            if box[2] > box[0] and box[3] > box[1]:
+                scale = (box[2] - box[0]) / self._bar_template.shape[1]
+                score = float(detected_score or 0.0)
+                self._bar_match_score = score
+                self._accept_bar_candidate(box, scale, score)
+                if self._bar_box is not None and self._bar_scale is not None:
+                    return self._padded_bar_rect(frame, self._bar_box), self._bar_scale
+
         if self._bar_locked and self._bar_box is not None and self._bar_scale is not None:
             return self._padded_bar_rect(frame, self._bar_box), self._bar_scale
+
+        if not allow_template_fallback:
+            if self._bar_box is not None and self._bar_scale is not None:
+                return self._padded_bar_rect(frame, self._bar_box), self._bar_scale
+            return None
 
         height, width = frame.shape[:2]
         rx, ry, rw, rh = self.timing.bar_search_roi
@@ -388,23 +463,56 @@ class RhythmBarTracker:
             return None
         return self._padded_bar_rect(frame, self._bar_box), self._bar_scale
 
+    def _marker_from_detection(
+        self,
+        rect: tuple[int, int, int, int] | None,
+        score: float | None,
+        bar_left: int,
+        bar_right: int,
+    ) -> tuple[float, float] | None:
+        if rect is None:
+            return None
+        marker_x = (rect[0] + rect[2]) / 2
+        if not (bar_left <= marker_x <= bar_right):
+            return None
+        if self._target_x is not None and marker_x > self._target_x + 8:
+            return None
+        if self._last_visual_x is not None:
+            distance = marker_x - self._last_visual_x
+            if distance < -80 or distance > 100:
+                return None
+        return marker_x, float(score or 0.0)
+
     def _accept_bar_candidate(
-        self, box: tuple[int, int, int, int], scale: float, score: float
+        self,
+        box: tuple[int, int, int, int],
+        scale: float,
+        score: float,
     ) -> None:
-        if self._bar_candidates:
-            previous = self._bar_candidates[-1]
-            if abs(box[0] - previous[0]) > 18 or abs(box[1] - previous[1]) > 10:
-                self._bar_candidates.clear()
         self._bar_candidates.append((*box, score))
-        self._bar_box = box
-        self._bar_scale = scale
-        if len(self._bar_candidates) >= 3:
-            boxes = list(self._bar_candidates)
-            self._bar_box = tuple(
-                round(float(np.median([item[index] for item in boxes])))
-                for index in range(4)
+        boxes = list(self._bar_candidates)
+        median_box = tuple(
+            float(np.median([item[index] for item in boxes])) for index in range(4)
+        )
+        if self._filtered_bar_box is None:
+            self._filtered_bar_box = median_box
+        else:
+            alpha = self.timing.bar_low_pass_alpha
+            self._filtered_bar_box = tuple(
+                previous_value + alpha * (new_value - previous_value)
+                for previous_value, new_value in zip(
+                    self._filtered_bar_box, median_box
+                )
             )
-            self._bar_match_score = float(np.median([item[4] for item in boxes]))
+        self._bar_box = tuple(round(value) for value in self._filtered_bar_box)
+        filtered_width = self._bar_box[2] - self._bar_box[0]
+        self._bar_scale = (
+            filtered_width / self._bar_template.shape[1]
+            if filtered_width > 0
+            else scale
+        )
+        self._bar_match_score = float(np.median([item[4] for item in boxes]))
+        if len(self._bar_candidates) >= 3:
             self._bar_locked = True
 
     def _padded_bar_rect(

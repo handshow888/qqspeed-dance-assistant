@@ -26,17 +26,29 @@ def build_parser() -> argparse.ArgumentParser:
 
     subparsers.add_parser("calibrate", help="框选并保存实时箭头识别区域")
     subparsers.add_parser("live", help="实时截屏并观察识别结果")
-    train = subparsers.add_parser("train", help="使用 YOLO26n 训练箭头检测模型")
+    train = subparsers.add_parser("train", help="训练箭头、节奏条和滑块检测模型")
     train.add_argument("--dataset-root", type=Path, help="数据集根目录")
-    train.add_argument("--model", default="yolo26n.pt", help="预训练模型")
-    train.add_argument("--epochs", type=int, default=80, help="最大训练轮数")
+    train.add_argument(
+        "--model",
+        help="初始权重；默认依次使用现有10类、原8类、通用yolo26n权重",
+    )
+    train.add_argument("--epochs", type=int, default=100, help="最大训练轮数")
     train.add_argument("--imgsz", type=int, default=640, help="训练输入尺寸")
     train.add_argument("--batch", type=int, default=8, help="批大小")
-    train.add_argument("--patience", type=int, default=15, help="早停等待轮数")
+    train.add_argument("--patience", type=int, default=20, help="早停等待轮数")
     train.add_argument("--device", default="0", help="CUDA 设备编号或 cpu")
     train.add_argument("--workers", type=int, default=4, help="数据加载进程数")
     train.add_argument("--output-dir", type=Path, help="训练结果目录")
-    train.add_argument("--name", default="yolo26n_arrows", help="本次训练名称")
+    train.add_argument(
+        "--name", default="yolo26n_rhythm_10class", help="本次训练名称"
+    )
+    train.add_argument(
+        "--val-ratio",
+        type=float,
+        default=0.2,
+        help="val目录为空时，从train生成固定验证清单的比例",
+    )
+    train.add_argument("--seed", type=int, default=42, help="数据划分和训练随机种子")
     return parser
 
 
@@ -73,6 +85,8 @@ def main() -> int:
             workers=args.workers,
             output_dir=args.output_dir,
             run_name=args.name,
+            auto_val_ratio=args.val_ratio,
+            seed=args.seed,
         )
     raise AssertionError(f"未知命令：{command}")
 

@@ -22,6 +22,10 @@ MODIFIERS = {
     "WIN": MOD_WIN,
 }
 
+SPECIAL_KEYS = {
+    "=": 0xBB,  # VK_OEM_PLUS: the unshifted '=' key left of Backspace.
+}
+
 
 def parse_hotkey(value: str) -> tuple[int, int]:
     parts = [part.strip().upper() for part in value.split("+") if part.strip()]
@@ -37,6 +41,8 @@ def parse_hotkey(value: str) -> tuple[int, int]:
     key = parts[-1]
     if key.startswith("F") and key[1:].isdigit() and 1 <= int(key[1:]) <= 24:
         virtual_key = 0x70 + int(key[1:]) - 1
+    elif key in SPECIAL_KEYS:
+        virtual_key = SPECIAL_KEYS[key]
     elif len(key) == 1 and key.isalnum():
         virtual_key = ord(key)
     else:

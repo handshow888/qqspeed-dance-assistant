@@ -20,8 +20,10 @@
     "bar_width_ratio": 0.541,
     "bar_scale_factors": [1.0],
     "bar_match_threshold": 0.5,
+    "bar_low_pass_alpha": 0.005,
     "slider_match_threshold": 0.62,
     "cursor_match_threshold": 0.68,
+    "cursor_bar_ratio": 0.8,
     "cursor_prior_ratio": 0.75,
     "cursor_search_radius_ratio": 0.06
   }

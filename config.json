@@ -19,10 +19,10 @@
     "output_dir": "recordings"
   },
   "dataset": {
-    "enabled": false,
     "output_dir": "datasets/yolo_arrows",
     "split": "train",
-    "image_extension": ".png"
+    "image_extension": ".png",
+    "rhythm_capture_interval_seconds": 0.2
   },
   "space": {
     "enabled": true,
@@ -79,9 +79,19 @@
     "start": "Ctrl+F9",
     "pause_resume": "Ctrl+F10",
     "stop": "Ctrl+F11",
-    "record_roi": "Ctrl+F12"
+    "record_roi": "Ctrl+F12",
+    "capture_rhythm_dataset": "Ctrl+="
   },
   "yolo": {
-    "enabled": true
+    "enabled": true,
+    "model": "runs/yolo_arrow/yolo26n_rhythm_10class-2/weights/best.pt",
+    "confidence": 0.5,
+    "rhythm_bar_confidence": 0.4,
+    "slider_confidence": 0.3,
+    "iou": 0.45,
+    "image_size": 640,
+    "device": "0",
+    "half": true,
+    "max_detections": 16
   }
 }

@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import datetime
 from pathlib import Path
 import re
-from typing import Iterable
+from typing import Iterable, Protocol
 
 import numpy as np
 
@@ -12,7 +12,7 @@ from .detector import Detection
 from .image_io import write_image
 
 
-CLASS_NAMES = (
+ARROW_CLASS_NAMES = (
     "up_unpressed",
     "up_pressed",
     "down_unpressed",
@@ -22,7 +22,19 @@ CLASS_NAMES = (
     "right_unpressed",
     "right_pressed",
 )
+CLASS_NAMES = ARROW_CLASS_NAMES + (
+    "rhythm_bar",
+    "slider",
+)
 CLASS_IDS = {name: index for index, name in enumerate(CLASS_NAMES)}
+
+
+class BoxAnnotation(Protocol):
+    class_name: str
+    x: int
+    y: int
+    width: int
+    height: int
 
 
 def detection_class_id(detection: Detection) -> int:
@@ -67,17 +79,46 @@ def detection_to_yolo_line(
     )
 
 
+def object_to_yolo_line(
+    annotation: BoxAnnotation,
+    image_width: int,
+    image_height: int,
+) -> str:
+    if image_width <= 0 or image_height <= 0:
+        raise ValueError("图像尺寸必须大于 0")
+    try:
+        class_id = CLASS_IDS[annotation.class_name]
+    except KeyError as error:
+        raise ValueError(f"无法转换为 YOLO 类别：{annotation.class_name}") from error
+
+    left = min(max(float(annotation.x), 0.0), float(image_width))
+    top = min(max(float(annotation.y), 0.0), float(image_height))
+    right = min(max(float(annotation.x + annotation.width), left), float(image_width))
+    bottom = min(
+        max(float(annotation.y + annotation.height), top), float(image_height)
+    )
+    width = right - left
+    height = bottom - top
+    if width <= 0 or height <= 0:
+        raise ValueError("检测框不在图像范围内")
+    return (
+        f"{class_id} "
+        f"{(left + right) / 2.0 / image_width:.6f} "
+        f"{(top + bottom) / 2.0 / image_height:.6f} "
+        f"{width / image_width:.6f} {height / image_height:.6f}"
+    )
+
+
 def _safe_name(value: str) -> str:
     cleaned = re.sub(r"[^a-zA-Z0-9_-]+", "_", value.strip())
     return cleaned.strip("_") or "unknown"
 
 
 class YoloDatasetCollector:
-    """Save template-detector results as reviewable YOLO training samples."""
+    """Save detected objects as reviewable YOLO training samples."""
 
     def __init__(self, config: dict | None = None):
         values = config or {}
-        self.enabled = bool(values.get("enabled", False))
         self.output_dir = resolve_project_path(
             str(values.get("output_dir", "datasets/yolo_arrows"))
         )
@@ -91,17 +132,7 @@ class YoloDatasetCollector:
 
         self.session_id = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
         self.saved_count = 0
-        if self.enabled:
-            self._prepare_layout()
-
-    @property
-    def status(self) -> str:
-        if not self.enabled:
-            return "DATASET OFF"
-        return f"DATASET {self.split.upper()} {self.saved_count}"
-
-    def disable(self) -> None:
-        self.enabled = False
+        self._prepare_layout()
 
     def _prepare_layout(self) -> None:
         for split in ("train", "val"):
@@ -131,9 +162,8 @@ class YoloDatasetCollector:
         game_mode: str,
         ui_mode: str,
         reasons: Iterable[str],
-    ) -> tuple[Path, Path] | None:
-        if not self.enabled:
-            return None
+        extra_objects: Iterable[BoxAnnotation] = (),
+    ) -> tuple[Path, Path]:
         if frame.ndim != 3 or frame.shape[0] <= 0 or frame.shape[1] <= 0:
             raise ValueError("数据集帧必须是非空彩色图像")
 
@@ -144,6 +174,13 @@ class YoloDatasetCollector:
 
         height, width = frame.shape[:2]
         lines = [detection_to_yolo_line(item, width, height) for item in items]
+        lines.extend(
+            object_to_yolo_line(item, width, height)
+            for item in sorted(
+                list(extra_objects),
+                key=lambda item: (CLASS_IDS[item.class_name], item.x),
+            )
+        )
         self.saved_count += 1
         event_slug = "+".join(event_names)
         game_directory = _safe_name(game_mode)

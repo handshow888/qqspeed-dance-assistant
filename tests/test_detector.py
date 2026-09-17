@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 import unittest
 import time
 import random
@@ -12,7 +13,7 @@ import numpy as np
 
 from dance_tool import config as config_module
 from dance_tool.config import PROJECT_ROOT, load_config, resolve_mode_config
-from dance_tool.detector import ArrowDetector
+from dance_tool.detector import ArrowDetector, detection_preview_label
 from dance_tool.hotkeys import parse_hotkey
 from dance_tool.image_io import read_image
 from dance_tool.keyboard_input import (
@@ -27,13 +28,25 @@ from dance_tool.live import draw_status, frame_limit_delay, space_expire_reason
 from dance_tool.recorder import RoiVideoRecorder
 from dance_tool.selector import ModeSelector
 from dance_tool.space_timing import RhythmBarTracker, SpaceTimingConfig
-from dance_tool.train_yolo import validate_dataset, write_training_yaml
+from dance_tool.train_yolo import (
+    create_auto_validation_split,
+    format_class_distribution,
+    validate_dataset,
+    validate_class_coverage,
+    write_training_yaml,
+)
 from dance_tool.yolo_dataset import (
+    ARROW_CLASS_NAMES,
     CLASS_NAMES,
     YoloDatasetCollector,
     detection_to_yolo_line,
+    object_to_yolo_line,
 )
-from dance_tool.yolo_detector import yolo_rows_to_detections
+from dance_tool.yolo_detector import (
+    YoloObjectDetection,
+    yolo_rows_to_detections,
+    yolo_rows_to_frame_detections,
+)
 from main import build_parser
 
 
@@ -77,14 +90,16 @@ class ArrowDetectorTests(unittest.TestCase):
         self.assertEqual(0.0, frame_limit_delay(10.0, 60.0, now=10.020))
         self.assertEqual(0.0, frame_limit_delay(10.0, 0.0, now=10.005))
 
-    def test_train_command_defaults_are_for_small_arrow_dataset(self) -> None:
+    def test_train_command_defaults_are_for_ten_class_dataset(self) -> None:
         args = build_parser().parse_args(["train"])
         self.assertEqual("train", args.command)
-        self.assertEqual("yolo26n.pt", args.model)
-        self.assertEqual(80, args.epochs)
+        self.assertIsNone(args.model)
+        self.assertEqual(100, args.epochs)
         self.assertEqual(640, args.imgsz)
         self.assertEqual(8, args.batch)
         self.assertEqual("0", args.device)
+        self.assertEqual("yolo26n_rhythm_10class", args.name)
+        self.assertEqual(0.2, args.val_ratio)
 
     def test_mode_profiles_can_be_switched_without_changing_saved_mode(self) -> None:
         classic = resolve_mode_config(self.saved_config, "传统四键", "经典")
@@ -189,7 +204,32 @@ class ArrowDetectorTests(unittest.TestCase):
             detection_to_yolo_line(up, 200, 100),
         )
         self.assertTrue(detection_to_yolo_line(right, 200, 100).startswith("7 "))
-        self.assertEqual(8, len(CLASS_NAMES))
+        self.assertEqual(8, len(ARROW_CLASS_NAMES))
+        self.assertEqual(10, len(CLASS_NAMES))
+        self.assertEqual(("rhythm_bar", "slider"), CLASS_NAMES[-2:])
+
+    def test_preview_uses_single_letter_direction_abbreviation(self) -> None:
+        from dance_tool.detector import Detection
+
+        pressed_up = Detection("UP", 0.91, 10, 10, 20, 20, "pressed")
+        unpressed_left = Detection("LEFT", 0.82, 10, 10, 20, 20, "unpressed")
+        self.assertEqual("1:U/P 0.91", detection_preview_label(1, pressed_up))
+        self.assertEqual("2:L/U 0.82", detection_preview_label(2, unpressed_left))
+
+    def test_rhythm_objects_convert_to_yolo_classes_eight_and_nine(self) -> None:
+        bar = YoloObjectDetection("rhythm_bar", 0.9, 10, 20, 100, 10)
+        slider = YoloObjectDetection("slider", 0.9, 30, 20, 10, 10)
+        self.assertTrue(object_to_yolo_line(bar, 200, 100).startswith("8 "))
+        self.assertTrue(object_to_yolo_line(slider, 200, 100).startswith("9 "))
+
+    def test_ctrl_equals_uses_the_unshifted_oem_plus_key(self) -> None:
+        modifiers, virtual_key = parse_hotkey("Ctrl+=")
+        self.assertGreater(modifiers, 0)
+        self.assertEqual(0xBB, virtual_key)
+        self.assertEqual(
+            0.2,
+            float(self.saved_config["dataset"]["rhythm_capture_interval_seconds"]),
+        )
 
     def test_yolo_output_maps_to_existing_detection_interface(self) -> None:
         detections = yolo_rows_to_detections(
@@ -208,13 +248,43 @@ class ArrowDetectorTests(unittest.TestCase):
         )
         self.assertEqual((10, 11, 40, 41), detections[0].box)
 
-    def test_yolo_dataset_saves_named_events_with_empty_labels_supported(self) -> None:
+    def test_arrow_detector_ignores_rhythm_classes_from_ten_class_model(self) -> None:
+        detections = yolo_rows_to_detections(
+            [
+                [10, 10, 100, 30, 0.99, 8],
+                [20, 12, 35, 28, 0.98, 9],
+                [40, 10, 60, 30, 0.97, 2],
+            ],
+            CLASS_NAMES,
+            200,
+            100,
+        )
+        self.assertEqual(1, len(detections))
+        self.assertEqual("DOWN", detections[0].direction)
+
+    def test_yolo_frame_result_exposes_best_bar_and_slider(self) -> None:
+        result = yolo_rows_to_frame_detections(
+            [
+                [40, 10, 60, 30, 0.97, 2],
+                [10, 5, 190, 25, 0.81, 8],
+                [11, 5, 188, 25, 0.42, 8],
+                [25, 8, 35, 22, 0.88, 9],
+            ],
+            CLASS_NAMES,
+            200,
+            100,
+        )
+        self.assertEqual(1, len(result.arrows))
+        self.assertEqual("rhythm_bar", result.rhythm_bar.class_name)
+        self.assertEqual((10, 5, 190, 25), result.rhythm_bar.box)
+        self.assertEqual(30, result.slider.center_x)
+
+    def test_yolo_dataset_saves_named_captures_with_empty_labels_supported(self) -> None:
         from dance_tool.detector import Detection
 
         with TemporaryDirectory() as directory:
             collector = YoloDatasetCollector(
                 {
-                    "enabled": True,
                     "output_dir": directory,
                     "split": "train",
                 }
@@ -229,6 +299,10 @@ class ArrowDetectorTests(unittest.TestCase):
                 game_mode="traditional_four_key",
                 ui_mode="classic",
                 reasons={"arrow_detected"},
+                extra_objects=(
+                    YoloObjectDetection("rhythm_bar", 0.9, 10, 5, 180, 20),
+                    YoloObjectDetection("slider", 0.9, 30, 8, 12, 14),
+                ),
             )
             empty = collector.save_event(
                 frame,
@@ -268,7 +342,18 @@ class ArrowDetectorTests(unittest.TestCase):
             self.assertEqual(3, len(image_files))
             self.assertEqual(3, len(label_files))
             self.assertTrue((Path(directory) / "data.yaml").exists())
-            self.assertTrue(label_files[-1].read_text(encoding="utf-8").startswith("5 "))
+            self.assertEqual(
+                list(CLASS_NAMES),
+                (Path(directory) / "classes.txt")
+                .read_text(encoding="utf-8")
+                .splitlines(),
+            )
+            self.assertTrue(
+                label_files[-1].read_text(encoding="utf-8").startswith("5 ")
+            )
+            first_lines = first[1].read_text(encoding="utf-8").splitlines()
+            self.assertTrue(any(line.startswith("8 ") for line in first_lines))
+            self.assertTrue(any(line.startswith("9 ") for line in first_lines))
             empty_labels = [path for path in label_files if path.stat().st_size == 0]
             self.assertEqual(1, len(empty_labels))
             self.assertIn("bar_detected+space_pressed", empty_labels[0].name)
@@ -300,10 +385,72 @@ class ArrowDetectorTests(unittest.TestCase):
             summary = validate_dataset(root)
             self.assertEqual(1, summary["train"].images)
             self.assertEqual(1, summary["val"].boxes)
+            with self.assertRaisesRegex(ValueError, "必须分别覆盖全部10类"):
+                validate_class_coverage(summary)
             yaml_path = write_training_yaml(root)
             yaml_text = yaml_path.read_text(encoding="utf-8")
             self.assertIn("train: images/train", yaml_text)
             self.assertIn("7: right_pressed", yaml_text)
+
+    def test_auto_validation_split_keeps_sources_and_covers_all_classes(self) -> None:
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "classes.txt").write_text(
+                "\n".join(CLASS_NAMES) + "\n", encoding="utf-8"
+            )
+            image_dir = root / "images" / "train" / "traditional_four_key" / "classic"
+            label_dir = root / "labels" / "train" / "traditional_four_key" / "classic"
+            image_dir.mkdir(parents=True)
+            label_dir.mkdir(parents=True)
+            all_classes = "\n".join(
+                f"{class_id} 0.5 0.5 0.1 0.1" for class_id in range(10)
+            )
+            for index in range(10):
+                cv2.imwrite(
+                    str(image_dir / f"sample_{index:02d}.png"),
+                    np.zeros((32, 64, 3), dtype=np.uint8),
+                )
+                (label_dir / f"sample_{index:02d}.txt").write_text(
+                    all_classes + "\n", encoding="utf-8"
+                )
+
+            train_list, val_list, train_count, val_count = create_auto_validation_split(
+                root, val_ratio=0.2, seed=42
+            )
+            self.assertEqual((8, 2), (train_count, val_count))
+            self.assertEqual(10, len(list(image_dir.glob("*.png"))))
+            self.assertTrue(train_list.exists())
+            self.assertTrue(val_list.exists())
+            train_paths = set(train_list.read_text(encoding="utf-8").splitlines())
+            val_paths = set(val_list.read_text(encoding="utf-8").splitlines())
+            self.assertFalse(train_paths & val_paths)
+
+    def test_class_distribution_lists_train_and_val_counts(self) -> None:
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "classes.txt").write_text(
+                "\n".join(CLASS_NAMES) + "\n", encoding="utf-8"
+            )
+            all_classes = "\n".join(
+                f"{class_id} 0.5 0.5 0.1 0.1" for class_id in range(10)
+            )
+            for split in ("train", "val"):
+                image_dir = root / "images" / split
+                label_dir = root / "labels" / split
+                image_dir.mkdir(parents=True)
+                label_dir.mkdir(parents=True)
+                cv2.imwrite(
+                    str(image_dir / "sample.png"),
+                    np.zeros((32, 64, 3), dtype=np.uint8),
+                )
+                (label_dir / "sample.txt").write_text(
+                    all_classes + "\n", encoding="utf-8"
+                )
+            summary = validate_dataset(root)
+            validate_class_coverage(summary)
+            distribution = format_class_distribution(summary)
+            self.assertIn("rhythm_bar", distribution)
+            self.assertIn("train=1 val=1", distribution)
 
     def test_classic_full_screenshots_keep_low_confidence_arrows(self) -> None:
         expected = {
@@ -420,47 +567,7 @@ class ArrowDetectorTests(unittest.TestCase):
         )
         self.assertEqual("blocked", selector.poll()[0].kind)
 
-    def test_dataset_toggle_accepts_mouse_click_while_running(self) -> None:
-        selector = ModeSelector()
-        canvas = np.zeros((243, 700, 3), dtype=np.uint8)
-        selector.draw(
-            canvas,
-            "RUNNING",
-            "traditional_four_key",
-            "classic",
-            dataset_enabled=False,
-        )
-        toggle = next(
-            button for button in selector.buttons if button.kind == "dataset_toggle"
-        )
-        selector.on_mouse(
-            cv2.EVENT_LBUTTONUP,
-            (toggle.left + toggle.right) // 2,
-            (toggle.top + toggle.bottom) // 2,
-            0,
-            None,
-        )
-        event = selector.poll()[0]
-        self.assertEqual("dataset_toggle", event.kind)
-        self.assertEqual("true", event.value)
-
-        selector.draw(
-            canvas,
-            "PAUSED",
-            "traditional_four_key",
-            "classic",
-            dataset_enabled=True,
-        )
-        selector.on_mouse(
-            cv2.EVENT_LBUTTONUP,
-            (toggle.left + toggle.right) // 2,
-            (toggle.top + toggle.bottom) // 2,
-            0,
-            None,
-        )
-        self.assertEqual("false", selector.poll()[0].value)
-
-    def test_yolo_toggle_is_right_of_recording_and_blocked_while_running(self) -> None:
+    def test_yolo_toggle_is_right_of_split_and_blocked_while_running(self) -> None:
         selector = ModeSelector()
         canvas = np.zeros((243, 700, 3), dtype=np.uint8)
         selector.draw(
@@ -468,16 +575,15 @@ class ArrowDetectorTests(unittest.TestCase):
             "STOPPED",
             "traditional_four_key",
             "classic",
-            dataset_enabled=False,
             yolo_enabled=False,
-        )
-        recording = next(
-            button for button in selector.buttons if button.kind == "dataset_toggle"
         )
         yolo = next(
             button for button in selector.buttons if button.kind == "yolo_toggle"
         )
-        self.assertGreater(yolo.left, recording.right)
+        split = next(
+            button for button in selector.buttons if button.kind == "dataset_split"
+        )
+        self.assertGreater(yolo.left, split.right)
         selector.on_mouse(
             cv2.EVENT_LBUTTONUP,
             (yolo.left + yolo.right) // 2,
@@ -494,7 +600,6 @@ class ArrowDetectorTests(unittest.TestCase):
             "RUNNING",
             "traditional_four_key",
             "classic",
-            dataset_enabled=False,
             yolo_enabled=True,
         )
         yolo = next(
@@ -510,6 +615,51 @@ class ArrowDetectorTests(unittest.TestCase):
         blocked = selector.poll()[0]
         self.assertEqual("blocked", blocked.kind)
         self.assertEqual("yolo", blocked.value)
+
+    def test_dataset_split_toggle_is_mouse_only_and_blocked_while_running(self) -> None:
+        selector = ModeSelector()
+        canvas = np.zeros((243, 700, 3), dtype=np.uint8)
+        selector.draw(
+            canvas,
+            "STOPPED",
+            "traditional_four_key",
+            "classic",
+            dataset_split="train",
+        )
+        split = next(
+            button for button in selector.buttons if button.kind == "dataset_split"
+        )
+        selector.on_mouse(
+            cv2.EVENT_LBUTTONUP,
+            (split.left + split.right) // 2,
+            (split.top + split.bottom) // 2,
+            0,
+            None,
+        )
+        event = selector.poll()[0]
+        self.assertEqual("dataset_split", event.kind)
+        self.assertEqual("val", event.value)
+
+        selector.draw(
+            canvas,
+            "RUNNING",
+            "traditional_four_key",
+            "classic",
+            dataset_split="val",
+        )
+        split = next(
+            button for button in selector.buttons if button.kind == "dataset_split"
+        )
+        selector.on_mouse(
+            cv2.EVENT_LBUTTONUP,
+            (split.left + split.right) // 2,
+            (split.top + split.bottom) // 2,
+            0,
+            None,
+        )
+        blocked = selector.poll()[0]
+        self.assertEqual("blocked", blocked.kind)
+        self.assertEqual("dataset_split", blocked.value)
 
     def test_reaction_delay_has_hard_110ms_floor(self) -> None:
         timing = InputTiming.from_config(
@@ -567,6 +717,118 @@ class ArrowDetectorTests(unittest.TestCase):
         self.assertIsNone(cached.marker_x)
         self.assertTrue(cached.prediction_cached)
         self.assertAlmostEqual(observation.crossing_at, cached.crossing_at, delta=0.001)
+
+    def test_rhythm_tracker_uses_yolo_bar_slider_and_calibrated_cursor(self) -> None:
+        timing = SpaceTimingConfig.from_config(self.classic_config["space"])
+        tracker = RhythmBarTracker(timing)
+        observation = None
+        frame = np.zeros((246, 1224, 3), dtype=np.uint8)
+        for index, marker_x in enumerate((500, 520, 540, 560)):
+            observation = tracker.observe(
+                frame,
+                index * 0.04,
+                detected_bar_rect=(300, 30, 970, 50),
+                detected_bar_score=0.9,
+                detected_slider_rect=(marker_x - 10, 30, marker_x + 10, 50),
+                detected_slider_score=0.95,
+            )
+        self.assertIsNotNone(observation)
+        self.assertTrue(observation.bar_locked)
+        expected_target = 300 + (970 - 300) * timing.cursor_bar_ratio
+        self.assertAlmostEqual(expected_target, observation.target_x, delta=1)
+        self.assertAlmostEqual(560, observation.marker_x, delta=1)
+        self.assertAlmostEqual(500, observation.speed_px_per_second, delta=40)
+        self.assertIsNone(observation.cursor_match_score)
+
+        shifted = tracker.observe(
+            frame,
+            0.20,
+            detected_bar_rect=(320, 30, 990, 50),
+            detected_bar_score=0.9,
+            detected_slider_rect=(570, 30, 590, 50),
+            detected_slider_score=0.95,
+        )
+        expected_shifted = shifted.bar_rect[0] + (
+            shifted.bar_rect[2] - shifted.bar_rect[0]
+        ) * timing.cursor_bar_ratio
+        self.assertAlmostEqual(expected_shifted, shifted.target_x, delta=0.01)
+
+    def test_yolo_rhythm_mode_does_not_call_opencv_fallback(self) -> None:
+        timing = SpaceTimingConfig.from_config(self.classic_config["space"])
+        tracker = RhythmBarTracker(timing)
+        frame = np.zeros((246, 1224, 3), dtype=np.uint8)
+        with patch.object(
+            tracker,
+            "_find_slider",
+            side_effect=AssertionError("不应调用 OpenCV 滑块模板"),
+        ), patch.object(
+            tracker,
+            "_find_cursor",
+            side_effect=AssertionError("不应调用 OpenCV 光标模板"),
+        ):
+            observation = tracker.observe(
+                frame,
+                0.0,
+                detected_bar_rect=(300, 30, 970, 50),
+                detected_bar_score=0.9,
+                allow_template_fallback=False,
+            )
+        self.assertIsNone(observation.marker_x)
+
+        empty_tracker = RhythmBarTracker(timing)
+        with patch.object(
+            empty_tracker,
+            "_accept_bar_candidate",
+            side_effect=AssertionError("不应调用 OpenCV 节奏条模板"),
+        ):
+            missing = empty_tracker.observe(
+                frame,
+                0.0,
+                allow_template_fallback=False,
+            )
+        self.assertEqual((0, 0, 0, 0), missing.bar_rect)
+
+    def test_rhythm_bar_low_pass_filter_reduces_box_jitter(self) -> None:
+        timing = replace(
+            SpaceTimingConfig.from_config(self.classic_config["space"]),
+            bar_low_pass_alpha=0.01,
+        )
+        tracker = RhythmBarTracker(timing)
+        frame = np.zeros((246, 1224, 3), dtype=np.uint8)
+        first = tracker.observe(
+            frame,
+            0.0,
+            detected_bar_rect=(300, 30, 970, 50),
+            detected_bar_score=0.9,
+        )
+        second = tracker.observe(
+            frame,
+            0.02,
+            detected_bar_rect=(318, 30, 988, 50),
+            detected_bar_score=0.9,
+        )
+        third = tracker.observe(
+            frame,
+            0.04,
+            detected_bar_rect=(318, 30, 988, 50),
+            detected_bar_score=0.9,
+        )
+        self.assertEqual(300, first.bar_rect[0])
+        self.assertEqual(300, second.bar_rect[0])
+        self.assertEqual(300, third.bar_rect[0])
+        self.assertAlmostEqual(300.2691, tracker._filtered_bar_box[0], places=3)
+        self.assertLess(
+            third.bar_rect[0] - first.bar_rect[0],
+            318 - first.bar_rect[0],
+        )
+
+        outlier = tracker.observe(
+            frame,
+            0.06,
+            detected_bar_rect=(380, 30, 1050, 50),
+            detected_bar_score=0.9,
+        )
+        self.assertEqual(300, outlier.bar_rect[0])
 
     def test_rhythm_templates_locate_a_tight_bar_roi(self) -> None:
         path = PROJECT_ROOT / "recordings" / "标准.mp4"

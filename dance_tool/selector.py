@@ -37,7 +37,7 @@ class ModeSelector:
         self.enabled = True
         self.game_mode = "traditional_four_key"
         self.ui_mode = "classic"
-        self.dataset_enabled = False
+        self.dataset_split = "train"
         self.yolo_enabled = False
 
     def draw(
@@ -46,13 +46,13 @@ class ModeSelector:
         state: str,
         game_mode: str,
         ui_mode: str,
-        dataset_enabled: bool = False,
         yolo_enabled: bool = False,
+        dataset_split: str = "train",
     ) -> None:
         self.enabled = state == "STOPPED"
         self.game_mode = game_mode
         self.ui_mode = ui_mode
-        self.dataset_enabled = bool(dataset_enabled)
+        self.dataset_split = "val" if dataset_split == "val" else "train"
         self.yolo_enabled = bool(yolo_enabled)
         self.buttons = []
         if canvas.shape[1] < 430:
@@ -72,15 +72,15 @@ class ModeSelector:
             1,
             cv2.LINE_AA,
         )
-        self._draw_toggle_button(
+        self._draw_value_button(
             canvas,
-            "dataset_toggle",
-            "RECORD",
-            self.dataset_enabled,
-            True,
+            "dataset_split",
+            "SPLIT",
+            self.dataset_split.upper(),
+            self.enabled,
             66,
             top,
-            180,
+            150,
         )
         self._draw_toggle_button(
             canvas,
@@ -88,9 +88,51 @@ class ModeSelector:
             "YOLO",
             self.yolo_enabled,
             self.enabled,
-            252,
+            222,
             top,
-            170,
+            140,
+        )
+
+    def _draw_value_button(
+        self,
+        canvas: np.ndarray,
+        kind: str,
+        label: str,
+        value: str,
+        interactive: bool,
+        left: int,
+        top: int,
+        width: int,
+    ) -> None:
+        right = min(canvas.shape[1] - 6, left + width)
+        choice = Choice("toggle", label, value)
+        self.buttons.append(Button(kind, choice, left, top, right, top + 29))
+        if interactive:
+            fill = (45, 75, 95)
+            border = (80, 190, 235)
+            text_color = (245, 255, 255)
+        else:
+            fill = (48, 48, 48)
+            border = (90, 90, 90)
+            text_color = (135, 135, 135)
+        cv2.rectangle(canvas, (left, top), (right, top + 29), fill, -1)
+        cv2.rectangle(canvas, (left, top), (right, top + 29), border, 1)
+        text = f"{label} {value}"
+        (text_width, text_height), _ = cv2.getTextSize(
+            text, cv2.FONT_HERSHEY_SIMPLEX, 0.43, 1
+        )
+        cv2.putText(
+            canvas,
+            text,
+            (
+                left + max(4, (right - left - text_width) // 2),
+                top + 18 + text_height // 3,
+            ),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.43,
+            text_color,
+            1,
+            cv2.LINE_AA,
         )
 
     def _draw_toggle_button(
@@ -208,14 +250,6 @@ class ModeSelector:
         button = next((item for item in self.buttons if item.contains(x, y)), None)
         if button is None:
             return
-        if button.kind == "dataset_toggle":
-            self.events.put(
-                SelectorEvent(
-                    button.kind,
-                    "false" if self.dataset_enabled else "true",
-                )
-            )
-            return
         if button.kind == "yolo_toggle":
             if not self.enabled:
                 self.events.put(SelectorEvent("blocked", "yolo"))
@@ -224,6 +258,17 @@ class ModeSelector:
                     SelectorEvent(
                         button.kind,
                         "false" if self.yolo_enabled else "true",
+                    )
+                )
+            return
+        if button.kind == "dataset_split":
+            if not self.enabled:
+                self.events.put(SelectorEvent("blocked", "dataset_split"))
+            else:
+                self.events.put(
+                    SelectorEvent(
+                        button.kind,
+                        "val" if self.dataset_split == "train" else "train",
                     )
                 )
             return

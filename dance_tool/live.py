@@ -30,7 +30,7 @@ from .recorder import RoiVideoRecorder
 from .selector import ModeSelector
 from .space_timing import RhythmBarTracker, RhythmObservation, SpaceTimingConfig
 from .yolo_dataset import YoloDatasetCollector
-from .yolo_detector import YoloArrowDetector
+from .yolo_detector import YoloArrowDetector, YoloFrameDetections
 
 
 WINDOW_NAME = "Dance Arrow Recognition - Q to quit"
@@ -60,6 +60,19 @@ def frame_limit_delay(
     current = time.perf_counter() if now is None else now
     target_period = 1.0 / maximum_fps
     return max(0.0, target_period - (current - frame_started_at))
+
+
+def wait_for_frame_limit(frame_started_at: float, maximum_fps: float) -> None:
+    """Use coarse sleep plus a short precision wait to avoid Windows oversleep."""
+    delay = frame_limit_delay(frame_started_at, maximum_fps)
+    if delay <= 0:
+        return
+    precision_window = 0.002
+    if delay > precision_window:
+        time.sleep(delay - precision_window)
+    deadline = frame_started_at + 1.0 / maximum_fps
+    while time.perf_counter() < deadline:
+        pass
 
 
 def configure_runtime_logging() -> None:
@@ -205,8 +218,8 @@ def draw_status(
     ui_mode: str = "",
     game_mode: str = "",
     selector: ModeSelector | None = None,
-    dataset_enabled: bool = False,
     yolo_enabled: bool = False,
+    dataset_split: str = "train",
 ) -> np.ndarray:
     scale = min(max(float(display_scale), 0.2), 1.0)
     display_width = max(1, round(frame.shape[1] * scale))
@@ -271,11 +284,11 @@ def draw_status(
             state,
             game_mode,
             ui_mode,
-            dataset_enabled,
             yolo_enabled,
+            dataset_split,
         )
 
-    footer = recording_status or message or "Ctrl+F12 Start/Stop ROI recording"
+    footer = recording_status or message or "Ctrl+= Rhythm shots | Ctrl+F12 ROI video"
     if footer:
         cv2.putText(
             canvas,
@@ -372,7 +385,6 @@ def run_live(
         if yolo_enabled:
             detector = yolo_detector
     recorder = RoiVideoRecorder(config.get("recording", {}))
-    dataset_collector = YoloDatasetCollector(config.get("dataset", {}))
     window_config = config.setdefault(
         "window", {"scale": 0.55, "always_on_top": False}
     )
@@ -426,14 +438,18 @@ def run_live(
     last_observed_sequence: tuple[str, ...] = ()
     input_status = "DISABLED" if not input_enabled else "READY"
     record_requested = False
+    rhythm_capture_enabled = False
+    rhythm_capture_collector: YoloDatasetCollector | None = None
+    rhythm_capture_due_at: float | None = None
+    rhythm_capture_interval = max(
+        0.1,
+        float(config.get("dataset", {}).get("rhythm_capture_interval_seconds", 0.2)),
+    )
     space_armed = False
     space_scheduled = False
     space_tracking_active = False
     space_offset_ms: float | None = None
     space_armed_at: float | None = None
-    dataset_arrow_captured = False
-    dataset_bar_captured = False
-    pending_dataset_events: set[str] = set()
     space_status = (
         "WAIT DIRECTIONS"
         if space_timing is not None and space_timing.enabled
@@ -443,20 +459,17 @@ def run_live(
     def reset_round() -> None:
         nonlocal round_armed, first_seen_at, reaction_delay_seconds
         nonlocal clear_frames, transition_seen, input_status
-        nonlocal dataset_arrow_captured
         round_armed = True
         first_seen_at = None
         reaction_delay_seconds = None
         clear_frames = 0
         transition_seen = False
-        dataset_arrow_captured = False
         input_status = "DISABLED" if not input_enabled else "READY"
 
     def cancel_space_cycle(*, clear_target: bool = False) -> None:
         nonlocal space_armed, space_scheduled, space_tracking_active
         nonlocal space_offset_ms, space_status
         nonlocal space_armed_at
-        nonlocal dataset_bar_captured
         if space_sender is not None:
             space_sender.cancel()
         if space_tracker is not None:
@@ -466,7 +479,6 @@ def run_live(
         space_tracking_active = False
         space_offset_ms = None
         space_armed_at = None
-        dataset_bar_captured = False
         space_status = (
             "WAIT DIRECTIONS"
             if space_timing is not None and space_timing.enabled
@@ -510,32 +522,30 @@ def run_live(
                 )
             previous_frame_started_at = frame_started_at
             for selection in selector.poll():
-                if selection.kind == "dataset_toggle":
-                    enable_dataset = selection.value == "true"
+                if selection.kind == "dataset_split":
+                    if state != "STOPPED":
+                        status_message = "Stop recognition before switching TRAIN/VAL"
+                        continue
+                    next_split = "val" if selection.value == "val" else "train"
                     dataset_settings = saved_config.setdefault("dataset", {})
-                    dataset_settings["enabled"] = enable_dataset
-                    config.setdefault("dataset", {})["enabled"] = enable_dataset
-                    if enable_dataset:
-                        try:
-                            dataset_collector = YoloDatasetCollector(dataset_settings)
-                        except (OSError, ValueError) as error:
-                            dataset_settings["enabled"] = False
-                            config["dataset"]["enabled"] = False
-                            status_message = f"Dataset recording failed: {error}"
-                            LOGGER.exception("dataset_recording_enable_failed")
-                        else:
-                            status_message = (
-                                f"Dataset recording ON ({dataset_collector.split})"
-                            )
-                            LOGGER.info(
-                                "dataset_recording_toggled enabled=true split=%s",
-                                dataset_collector.split,
-                            )
+                    previous_split = str(dataset_settings.get("split", "train"))
+                    dataset_settings["split"] = next_split
+                    config.setdefault("dataset", {})["split"] = next_split
+                    try:
+                        next_rhythm_collector = rhythm_capture_collector
+                        if rhythm_capture_enabled:
+                            capture_settings = dict(dataset_settings)
+                            next_rhythm_collector = YoloDatasetCollector(capture_settings)
+                    except (OSError, ValueError) as error:
+                        dataset_settings["split"] = previous_split
+                        config["dataset"]["split"] = previous_split
+                        status_message = f"Dataset split failed: {error}"
+                        LOGGER.exception("dataset_split_failed")
                     else:
-                        dataset_collector.disable()
-                        status_message = "Dataset recording OFF"
-                        LOGGER.info("dataset_recording_toggled enabled=false")
-                    save_config(saved_config)
+                        rhythm_capture_collector = next_rhythm_collector
+                        save_config(saved_config)
+                        status_message = f"Dataset split: {next_split.upper()}"
+                        LOGGER.info("dataset_split_changed split=%s", next_split)
                     continue
                 if selection.kind == "yolo_toggle":
                     if state != "STOPPED":
@@ -561,7 +571,7 @@ def run_live(
                         if yolo_detector is not None:
                             yolo_enabled = True
                             detector = yolo_detector
-                            status_message = "Arrow detector: YOLO (preloaded)"
+                            status_message = "Detector: YOLO arrows + rhythm (preloaded)"
                             LOGGER.info(
                                 "arrow_detector_switched backend=yolo model=%s",
                                 yolo_detector.model_path,
@@ -569,20 +579,22 @@ def run_live(
                     else:
                         yolo_enabled = False
                         detector = opencv_detector
-                        status_message = "Arrow detector: OpenCV"
+                        status_message = "Detector: OpenCV"
                         LOGGER.info("arrow_detector_switched backend=opencv")
                     save_config(saved_config)
                     history.clear()
                     stable_sequence = ()
                     last_observed_sequence = ()
                     reset_round()
+                    cancel_space_cycle(clear_target=True)
                     continue
                 if selection.kind == "blocked":
-                    status_message = (
-                        "Stop recognition before switching YOLO"
-                        if selection.value == "yolo"
-                        else "Stop recognition before switching mode"
-                    )
+                    if selection.value == "yolo":
+                        status_message = "Stop recognition before switching YOLO"
+                    elif selection.value == "dataset_split":
+                        status_message = "Stop recognition before switching TRAIN/VAL"
+                    else:
+                        status_message = "Stop recognition before switching mode"
                     continue
                 if state != "STOPPED":
                     status_message = "Stop recognition before switching mode"
@@ -726,6 +738,54 @@ def run_live(
                     else:
                         record_requested = True
                         status_message = "Starting ROI recording..."
+                elif event == "capture_rhythm_dataset":
+                    if rhythm_capture_enabled:
+                        rhythm_capture_enabled = False
+                        rhythm_capture_due_at = None
+                        saved_count = (
+                            rhythm_capture_collector.saved_count
+                            if rhythm_capture_collector is not None
+                            else 0
+                        )
+                        status_message = (
+                            f"Rhythm screenshots OFF ({saved_count} saved)"
+                        )
+                        LOGGER.info(
+                            "rhythm_capture_toggled enabled=false saved=%d",
+                            saved_count,
+                        )
+                    else:
+                        if (
+                            yolo_detector is None
+                            or not yolo_detector.supports_rhythm_classes
+                        ):
+                            status_message = (
+                                "Rhythm screenshots require the 10-class YOLO model"
+                            )
+                            continue
+                        capture_settings = dict(config.get("dataset", {}))
+                        try:
+                            rhythm_capture_collector = YoloDatasetCollector(
+                                capture_settings
+                            )
+                        except (OSError, ValueError) as error:
+                            rhythm_capture_collector = None
+                            status_message = f"Rhythm screenshots failed: {error}"
+                            LOGGER.exception("rhythm_capture_enable_failed")
+                        else:
+                            rhythm_capture_enabled = True
+                            rhythm_capture_due_at = (
+                                time.perf_counter() + rhythm_capture_interval
+                            )
+                            status_message = (
+                                "Rhythm screenshots ON "
+                                f"({rhythm_capture_interval:g}s)"
+                            )
+                            LOGGER.info(
+                                "rhythm_capture_toggled enabled=true split=%s interval=%s",
+                                rhythm_capture_collector.split,
+                                rhythm_capture_interval,
+                            )
                 elif event == "error":
                     status_message = message
 
@@ -770,7 +830,6 @@ def run_live(
 
             for event, payload in (space_sender.poll() if space_sender is not None else []):
                 if event == "started":
-                    pending_dataset_events.add("space_pressed")
                     LOGGER.info("space_started payload=%r", payload)
                 elif event == "completed":
                     space_status = (
@@ -818,9 +877,14 @@ def run_live(
 
             captured_at = time.perf_counter()
             detections = []
+            yolo_frame: YoloFrameDetections | None = None
             if state == "RUNNING" and detector is not None:
                 try:
-                    detections = detector.detect(frame)
+                    if yolo_enabled and yolo_detector is not None:
+                        yolo_frame = yolo_detector.detect_frame(frame)
+                        detections = list(yolo_frame.arrows)
+                    else:
+                        detections = detector.detect(frame)
                 except Exception as error:
                     if not yolo_enabled:
                         raise
@@ -841,8 +905,6 @@ def run_live(
                     if detector is not None:
                         detections = detector.detect(frame)
             sequence = tuple(item.direction for item in detections)
-            dataset_events = set(pending_dataset_events)
-            pending_dataset_events.clear()
             space_observation: RhythmObservation | None = None
             if (
                 state == "RUNNING"
@@ -852,10 +914,25 @@ def run_live(
                 and space_timing.enabled
                 and space_tracking_active
             ):
-                space_observation = space_tracker.observe(frame, captured_at)
-                if space_observation.bar_locked and not dataset_bar_captured:
-                    dataset_bar_captured = True
-                    dataset_events.add("bar_detected")
+                rhythm_bar = yolo_frame.rhythm_bar if yolo_frame is not None else None
+                rhythm_slider = yolo_frame.slider if yolo_frame is not None else None
+                space_observation = space_tracker.observe(
+                    frame,
+                    captured_at,
+                    detected_bar_rect=(rhythm_bar.box if rhythm_bar is not None else None),
+                    detected_bar_score=(
+                        rhythm_bar.score if rhythm_bar is not None else None
+                    ),
+                    detected_slider_rect=(
+                        rhythm_slider.box if rhythm_slider is not None else None
+                    ),
+                    detected_slider_score=(
+                        rhythm_slider.score if rhythm_slider is not None else None
+                    ),
+                    allow_template_fallback=not (
+                        yolo_enabled and yolo_frame is not None
+                    ),
+                )
                 crossing_at = space_observation.crossing_at
                 if (
                     space_armed
@@ -1043,9 +1120,6 @@ def run_live(
                             max(0, round(remaining * 1000)),
                             target_hwnd,
                         )
-                if stable_sequence and not dataset_arrow_captured:
-                    dataset_arrow_captured = True
-                    dataset_events.add("arrow_detected")
                 annotated = (
                     detector.annotate(frame, detections)
                     if detector is not None
@@ -1056,31 +1130,51 @@ def run_live(
             else:
                 annotated = frame.copy()
 
-            if dataset_events and dataset_collector.enabled:
+            if (
+                rhythm_capture_enabled
+                and rhythm_capture_collector is not None
+                and state == "RUNNING"
+                and rhythm_capture_due_at is not None
+                and captured_at >= rhythm_capture_due_at
+            ):
                 try:
-                    saved_sample = dataset_collector.save_event(
+                    capture_yolo = yolo_frame
+                    if capture_yolo is None:
+                        if yolo_detector is None:
+                            raise RuntimeError("10-class YOLO model is unavailable")
+                        capture_yolo = yolo_detector.detect_frame(frame)
+                    extra_objects = [
+                        item
+                        for item in (
+                            capture_yolo.rhythm_bar,
+                            capture_yolo.slider,
+                        )
+                        if item is not None
+                    ]
+                    saved_sample = rhythm_capture_collector.save_event(
                         frame,
                         detections,
                         game_mode=config["game_mode"],
                         ui_mode=config["ui_mode"],
-                        reasons=dataset_events,
+                        reasons={"rhythm_capture"},
+                        extra_objects=extra_objects,
                     )
                     if saved_sample is not None:
                         image_path, label_path = saved_sample
                         LOGGER.info(
-                            "dataset_sample_saved image=%s label=%s detections=%d reasons=%r",
+                            "rhythm_capture_saved image=%s label=%s arrows=%d rhythm=%d",
                             image_path,
                             label_path,
                             len(detections),
-                            sorted(dataset_events),
+                            len(extra_objects),
                         )
                 except Exception as error:
-                    dataset_collector.disable()
-                    saved_config.setdefault("dataset", {})["enabled"] = False
-                    config.setdefault("dataset", {})["enabled"] = False
-                    save_config(saved_config)
-                    status_message = f"Dataset saving disabled: {error}"
-                    LOGGER.exception("dataset_sample_save_failed")
+                    rhythm_capture_enabled = False
+                    rhythm_capture_due_at = None
+                    status_message = f"Rhythm screenshots disabled: {error}"
+                    LOGGER.exception("rhythm_capture_save_failed")
+                else:
+                    rhythm_capture_due_at = captured_at + rhythm_capture_interval
 
             fps = (
                 len(frame_times) / max(sum(frame_times), 1e-6)
@@ -1088,11 +1182,18 @@ def run_live(
                 else 0.0
             )
             stable_count = sum(1 for item in history if item == (history[-1] if history else ()))
-            recording_status = None
+            activity_status: list[str] = []
             if recorder.active:
-                recording_status = f"REC {recorder.elapsed_seconds():.1f}s -> {recorder.output_path.name}"
-            elif dataset_collector.enabled:
-                recording_status = dataset_collector.status
+                activity_status.append(
+                    f"REC {recorder.elapsed_seconds():.1f}s -> "
+                    f"{recorder.output_path.name}"
+                )
+            if rhythm_capture_enabled and rhythm_capture_collector is not None:
+                activity_status.append(
+                    f"SHOTS {rhythm_capture_collector.split.upper()} "
+                    f"{rhythm_capture_collector.saved_count}"
+                )
+            recording_status = " | ".join(activity_status) or None
             display = draw_status(
                 annotated,
                 state,
@@ -1109,8 +1210,8 @@ def run_live(
                 config["ui_mode"],
                 config["game_mode"],
                 selector,
-                dataset_collector.enabled,
                 yolo_enabled,
+                str(config.get("dataset", {}).get("split", "train")),
             )
             preview.show(display)
             key = cv2.waitKey(1) & 0xFF
@@ -1118,9 +1219,7 @@ def run_live(
                 break
             if cv2.getWindowProperty(WINDOW_NAME, cv2.WND_PROP_VISIBLE) < 1:
                 break
-            delay = frame_limit_delay(frame_started_at, maximum_fps)
-            if delay > 0:
-                time.sleep(delay)
+            wait_for_frame_limit(frame_started_at, maximum_fps)
     finally:
         LOGGER.info("live_stop")
         incomplete_recording = recorder.stop()

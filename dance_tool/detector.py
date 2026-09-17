@@ -18,7 +18,21 @@ COLORS = {
     "LEFT": (255, 180, 40),
     "RIGHT": (220, 80, 220),
 }
+DIRECTION_ABBREVIATIONS = {
+    "UP": "U",
+    "DOWN": "D",
+    "LEFT": "L",
+    "RIGHT": "R",
+}
 LOGGER = logging.getLogger("dance_tool.runtime")
+
+
+def detection_preview_label(index: int, detection: "Detection") -> str:
+    direction = DIRECTION_ABBREVIATIONS.get(
+        detection.direction, detection.direction[:1]
+    )
+    state = "P" if detection.appearance == "pressed" else "U"
+    return f"{index}:{direction}/{state} {detection.score:.2f}"
 
 
 @dataclass(frozen=True)
@@ -244,8 +258,7 @@ class ArrowDetector:
                 color,
                 2,
             )
-            state = "P" if detection.appearance == "pressed" else "U"
-            label = f"{index}:{detection.direction}/{state} {detection.score:.2f}"
+            label = detection_preview_label(index, detection)
             cv2.putText(
                 canvas,
                 label,
