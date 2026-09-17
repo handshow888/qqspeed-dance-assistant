@@ -212,8 +212,22 @@ class ArrowDetectorTests(unittest.TestCase):
             self.assertIsNotNone(empty)
             self.assertIsNotNone(pressed_sample)
             self.assertEqual(3, collector.saved_count)
-            image_files = list((Path(directory) / "images" / "train").glob("*.png"))
-            label_files = list((Path(directory) / "labels" / "train").glob("*.txt"))
+            image_root = (
+                Path(directory)
+                / "images"
+                / "train"
+                / "traditional_four_key"
+                / "classic"
+            )
+            label_root = (
+                Path(directory)
+                / "labels"
+                / "train"
+                / "traditional_four_key"
+                / "classic"
+            )
+            image_files = list(image_root.glob("*.png"))
+            label_files = list(label_root.glob("*.txt"))
             self.assertEqual(3, len(image_files))
             self.assertEqual(3, len(label_files))
             self.assertTrue((Path(directory) / "data.yaml").exists())

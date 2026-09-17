@@ -103,10 +103,12 @@ D:\Pyhton\python3.10.7\python.exe -m venv .venv
 datasets/yolo_arrows/
 ├── data.yaml
 ├── classes.txt
-├── images/train/
-├── images/val/
-├── labels/train/
-└── labels/val/
+├── images/
+│   ├── train/<玩法>/<UI>/
+│   └── val/<玩法>/<UI>/
+└── labels/
+    ├── train/<玩法>/<UI>/
+    └── val/<玩法>/<UI>/
 ```
 
 类别固定为：
@@ -135,6 +137,7 @@ datasets/yolo_arrows/
 
 - 每一轮箭头连续两帧稳定、节奏条首次锁定，以及自动空格键真正按下时各触发一次保存；同一帧的多个触发会合并为一个样本。
 - 文件名包含 `arrow_detected`、`bar_detected` 或 `space_pressed`，便于检查样本来源。
+- 图片和标签会按玩法与 UI 风格分目录保存，例如 `images/train/traditional_four_key/classic/`；对应标签位于相同层级的 `labels` 目录。
 - 节奏条和空格事件即使没有检测到箭头也会保存空标签文件；这是对应真实游戏时刻的负样本，不是按固定频率抓取的随机空帧。
 - 采集训练集时保持 `split` 为 `train`。请使用另一段独立录屏或游戏场次，将 `split` 改为 `val` 后采集验证集，避免相邻帧同时进入训练集和验证集。
 - `datasets` 已加入 `.gitignore`，本地采集的大图片不会误提交到仓库。

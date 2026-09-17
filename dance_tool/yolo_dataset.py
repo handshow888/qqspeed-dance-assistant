@@ -146,14 +146,31 @@ class YoloDatasetCollector:
         lines = [detection_to_yolo_line(item, width, height) for item in items]
         self.saved_count += 1
         event_slug = "+".join(event_names)
+        game_directory = _safe_name(game_mode)
+        ui_directory = _safe_name(ui_mode)
         stem = (
-            f"{self.session_id}_{_safe_name(game_mode)}_"
-            f"{_safe_name(ui_mode)}_{event_slug}_{self.saved_count:06d}"
+            f"{self.session_id}_{game_directory}_"
+            f"{ui_directory}_{event_slug}_{self.saved_count:06d}"
         )
-        image_path = self.output_dir / "images" / self.split / f"{stem}{self.image_extension}"
-        label_path = self.output_dir / "labels" / self.split / f"{stem}.txt"
+        image_path = (
+            self.output_dir
+            / "images"
+            / self.split
+            / game_directory
+            / ui_directory
+            / f"{stem}{self.image_extension}"
+        )
+        label_path = (
+            self.output_dir
+            / "labels"
+            / self.split
+            / game_directory
+            / ui_directory
+            / f"{stem}.txt"
+        )
         try:
             write_image(image_path, frame)
+            label_path.parent.mkdir(parents=True, exist_ok=True)
             label_path.write_text(
                 "\n".join(lines) + ("\n" if lines else ""),
                 encoding="utf-8",
