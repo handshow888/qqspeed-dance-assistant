@@ -13,9 +13,9 @@
     "bottom_ratio": 0.93
   },
   "window": {
-    "scale": 0.55,
-    "always_on_top": true,
-    "max_fps": 60
+    "scale": 0.4,
+    "topmost_mode": "running",
+    "max_fps": 90
   },
   "recording": {
     "fps": 30,
@@ -41,7 +41,7 @@
       1.0,
       1.1
     ],
-    "cursor_window_ratio": 0.6,
+    "cursor_window_ratio": 0.618,
     "mean_offset_ms": 0,
     "stddev_ms": 8,
     "max_abs_offset_ms": 25,
@@ -78,7 +78,6 @@
     "target_window_title_contains": ""
   },
   "hotkeys": {
-    "toggle_topmost": "Ctrl+F7",
     "select_roi": "Ctrl+F9",
     "start": "Ctrl+F10",
     "stop": "Ctrl+F11",
@@ -87,7 +86,7 @@
   },
   "yolo": {
     "enabled": true,
-    "model": "runs/yolo_arrow/yolo26n_rhythm_10class-2/weights/best.pt",
+    "model": "runs/yolo_arrow/yolo26n_rhythm_10class-3/weights/best.pt",
     "confidence": 0.5,
     "slider_confidence": 0.3,
     "iou": 0.45,

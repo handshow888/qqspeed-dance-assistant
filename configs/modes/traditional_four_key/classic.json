@@ -16,6 +16,6 @@
   "space": {
     "slider_templates": ["assets/traditional_four_key/classic/templates/节奏条滑块.png"],
     "slider_match_threshold": 0.62,
-    "cursor_window_ratio": 0.617371
+    "cursor_window_ratio": 0.618
   }
 }

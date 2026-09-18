@@ -12,11 +12,47 @@ CONFIG_PATH = PROJECT_ROOT / "config.json"
 MODE_CONFIG_ROOT = PROJECT_ROOT / "configs" / "modes"
 LOG_DIR = PROJECT_ROOT / "logs"
 _ACTIVE_LOG_PATH: Path | None = None
+TOPMOST_MODES = ("off", "always", "running")
 
 
 def load_config() -> dict[str, Any]:
     with CONFIG_PATH.open("r", encoding="utf-8") as file:
         return json.load(file)
+
+
+def changed_config_paths(
+    previous: Any,
+    current: Any,
+    prefix: str = "",
+) -> set[str]:
+    """Return dotted paths whose effective JSON values changed."""
+    if isinstance(previous, dict) and isinstance(current, dict):
+        changed: set[str] = set()
+        for key in previous.keys() | current.keys():
+            path = f"{prefix}.{key}" if prefix else str(key)
+            if key not in previous or key not in current:
+                changed.add(path)
+                continue
+            changed.update(changed_config_paths(previous[key], current[key], path))
+        return changed
+    return {prefix or "<root>"} if previous != current else set()
+
+
+def normalize_topmost_mode(window_config: dict[str, Any] | None) -> str:
+    values = window_config or {}
+    if "topmost_mode" not in values:
+        return "always" if bool(values.get("always_on_top", False)) else "off"
+    mode = str(values["topmost_mode"]).strip().lower()
+    if mode not in TOPMOST_MODES:
+        raise ValueError("window.topmost_mode 只能是 off、always 或 running")
+    return mode
+
+
+def topmost_enabled_for_state(mode: str, state: str) -> bool:
+    normalized = str(mode).strip().lower()
+    return normalized == "always" or (
+        normalized == "running" and state == "RUNNING"
+    )
 
 
 def _deep_update(target: dict[str, Any], source: dict[str, Any]) -> None:

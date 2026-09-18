@@ -9,6 +9,13 @@ import numpy as np
 from .modes import GAME_MODES, UI_MODES, Choice
 
 
+TOPMOST_DISPLAYS = {
+    "off": "OFF",
+    "always": "ALWAYS",
+    "running": "RUNNING",
+}
+
+
 @dataclass(frozen=True)
 class SelectorEvent:
     kind: str
@@ -38,7 +45,9 @@ class ModeSelector:
         self.game_mode = "traditional_four_key"
         self.ui_mode = "classic"
         self.dataset_split = "train"
+        self.dataset_split_enabled = True
         self.yolo_enabled = False
+        self.topmost_mode = "off"
 
     def draw(
         self,
@@ -48,18 +57,25 @@ class ModeSelector:
         ui_mode: str,
         yolo_enabled: bool = False,
         dataset_split: str = "train",
+        dataset_split_enabled: bool = True,
+        topmost_mode: str = "off",
     ) -> None:
         self.enabled = state == "STOPPED"
         self.game_mode = game_mode
         self.ui_mode = ui_mode
         self.dataset_split = "val" if dataset_split == "val" else "train"
+        self.dataset_split_enabled = bool(dataset_split_enabled)
         self.yolo_enabled = bool(yolo_enabled)
+        self.topmost_mode = (
+            topmost_mode if topmost_mode in TOPMOST_DISPLAYS else "off"
+        )
         self.buttons = []
         if canvas.shape[1] < 430:
             return
         self._draw_row(canvas, "GAME", "game_mode", GAME_MODES, 116, game_mode)
         self._draw_row(canvas, "UI", "ui_mode", UI_MODES, 151, ui_mode)
         self._draw_toggles(canvas, 186)
+        self._draw_topmost(canvas, 8)
 
     def _draw_toggles(self, canvas: np.ndarray, top: int) -> None:
         cv2.putText(
@@ -77,7 +93,7 @@ class ModeSelector:
             "dataset_split",
             "SPLIT",
             self.dataset_split.upper(),
-            self.enabled,
+            self.dataset_split_enabled,
             66,
             top,
             150,
@@ -91,6 +107,30 @@ class ModeSelector:
             222,
             top,
             140,
+        )
+        self._draw_value_button(
+            canvas,
+            "config_reload",
+            "RELOAD",
+            "JSON",
+            self.enabled,
+            368,
+            top,
+            140,
+        )
+
+    def _draw_topmost(self, canvas: np.ndarray, top: int) -> None:
+        width = 190
+        left = max(6, canvas.shape[1] - width - 10)
+        self._draw_value_button(
+            canvas,
+            "topmost_mode",
+            "TOP",
+            TOPMOST_DISPLAYS[self.topmost_mode],
+            True,
+            left,
+            top,
+            width,
         )
 
     def _draw_value_button(
@@ -262,7 +302,7 @@ class ModeSelector:
                 )
             return
         if button.kind == "dataset_split":
-            if not self.enabled:
+            if not self.dataset_split_enabled:
                 self.events.put(SelectorEvent("blocked", "dataset_split"))
             else:
                 self.events.put(
@@ -271,6 +311,20 @@ class ModeSelector:
                         "val" if self.dataset_split == "train" else "train",
                     )
                 )
+            return
+        if button.kind == "config_reload":
+            if not self.enabled:
+                self.events.put(SelectorEvent("blocked", "config_reload"))
+            else:
+                self.events.put(SelectorEvent(button.kind))
+            return
+        if button.kind == "topmost_mode":
+            next_mode = {
+                "off": "always",
+                "always": "running",
+                "running": "off",
+            }[self.topmost_mode]
+            self.events.put(SelectorEvent(button.kind, next_mode))
             return
         if not self.enabled:
             self.events.put(SelectorEvent("blocked"))

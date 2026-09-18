@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Iterable, Sequence
 
 import numpy as np
@@ -11,6 +12,38 @@ from .yolo_dataset import ARROW_CLASS_NAMES, CLASS_NAMES
 
 
 DEFAULT_MODEL_PATH = "runs/yolo_arrow/yolo26n_rhythm_10class/weights/best.pt"
+
+
+@dataclass(frozen=True)
+class YoloRuntimeSettings:
+    confidence: float
+    slider_confidence: float
+    iou: float
+    image_size: int
+    max_detections: int
+
+    @classmethod
+    def from_config(cls, config: dict | None = None) -> "YoloRuntimeSettings":
+        values = config or {}
+        return cls(
+            confidence=min(max(float(values.get("confidence", 0.5)), 0.01), 1.0),
+            slider_confidence=min(
+                max(float(values.get("slider_confidence", 0.3)), 0.01), 1.0
+            ),
+            iou=min(max(float(values.get("iou", 0.45)), 0.01), 1.0),
+            image_size=max(320, int(values.get("image_size", 640))),
+            max_detections=max(1, int(values.get("max_detections", 16))),
+        )
+
+
+def yolo_model_signature(config: dict | None = None) -> tuple[Path, str, int | None]:
+    values = config or {}
+    model_path = resolve_project_path(
+        str(values.get("model", DEFAULT_MODEL_PATH))
+    ).resolve()
+    device = str(values.get("device", "0"))
+    use_half = bool(values.get("half", device != "cpu"))
+    return model_path, device, 16 if use_half else None
 
 
 @dataclass(frozen=True)
@@ -153,21 +186,10 @@ class YoloArrowDetector:
 
     def __init__(self, config: dict | None = None):
         values = config or {}
-        self.model_path = resolve_project_path(
-            str(values.get("model", DEFAULT_MODEL_PATH))
-        ).resolve()
+        self.model_path, self.device, self.quantize = yolo_model_signature(values)
         if not self.model_path.exists():
             raise ValueError(f"找不到 YOLO 权重：{self.model_path}")
-        self.confidence = min(max(float(values.get("confidence", 0.5)), 0.01), 1.0)
-        self.slider_confidence = min(
-            max(float(values.get("slider_confidence", 0.3)), 0.01), 1.0
-        )
-        self.iou = min(max(float(values.get("iou", 0.45)), 0.01), 1.0)
-        self.image_size = max(320, int(values.get("image_size", 640)))
-        self.device = str(values.get("device", "0"))
-        use_half = bool(values.get("half", self.device != "cpu"))
-        self.quantize = 16 if use_half else None
-        self.max_detections = max(1, int(values.get("max_detections", 16)))
+        self.apply_runtime_settings(YoloRuntimeSettings.from_config(values))
 
         try:
             import torch
@@ -193,6 +215,13 @@ class YoloArrowDetector:
                 "YOLO 权重类别不匹配，期望8类箭头，或现有10类箭头/滑块模型"
             )
         self.supports_slider_class = self.class_names == CLASS_NAMES
+
+    def apply_runtime_settings(self, settings: YoloRuntimeSettings) -> None:
+        self.confidence = settings.confidence
+        self.slider_confidence = settings.slider_confidence
+        self.iou = settings.iou
+        self.image_size = settings.image_size
+        self.max_detections = settings.max_detections
 
     def warmup(self) -> None:
         """Move the model to its inference device before the UI becomes interactive."""

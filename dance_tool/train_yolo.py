@@ -8,13 +8,17 @@ import shutil
 import time
 
 from .config import PROJECT_ROOT, load_config, resolve_project_path
-from .yolo_dataset import CLASS_NAMES
+from .yolo_dataset import ARROW_CLASS_NAMES, CLASS_NAMES
 
 
 IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".bmp"}
 DEFAULT_ARROW_MODEL = "runs/yolo_arrow/yolo26n_arrows/weights/best.pt"
 DEFAULT_TEN_CLASS_MODEL = "runs/yolo_arrow/yolo26n_rhythm_10class/weights/best.pt"
 DEFAULT_FOUNDATION_MODEL = "yolo26n.pt"
+REQUIRED_TRAINING_CLASS_NAMES = ARROW_CLASS_NAMES + ("slider",)
+REQUIRED_TRAINING_CLASS_IDS = frozenset(
+    CLASS_NAMES.index(class_name) for class_name in REQUIRED_TRAINING_CLASS_NAMES
+)
 
 
 @dataclass(frozen=True)
@@ -123,13 +127,15 @@ def validate_class_coverage(summary: dict[str, SplitSummary]) -> None:
     for split, split_summary in summary.items():
         absent = [
             CLASS_NAMES[class_id]
-            for class_id, count in enumerate(split_summary.class_counts)
-            if count == 0
+            for class_id in sorted(REQUIRED_TRAINING_CLASS_IDS)
+            if split_summary.class_counts[class_id] == 0
         ]
         if absent:
             missing.append(f"{split} 缺少：{', '.join(absent)}")
     if missing:
-        raise ValueError("训练和验证集必须分别覆盖全部10类；" + "；".join(missing))
+        raise ValueError(
+            "训练和验证集必须分别覆盖8类箭头和slider；" + "；".join(missing)
+        )
 
 
 def format_class_distribution(summary: dict[str, SplitSummary]) -> str:
@@ -166,7 +172,7 @@ def create_auto_validation_split(
         for image in images
     }
     all_classes = set().union(*image_classes.values())
-    expected_classes = set(range(len(CLASS_NAMES)))
+    expected_classes = set(REQUIRED_TRAINING_CLASS_IDS)
     missing_classes = expected_classes - all_classes
     if missing_classes:
         missing_names = ", ".join(CLASS_NAMES[index] for index in sorted(missing_classes))

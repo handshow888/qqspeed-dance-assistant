@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import time
+import ctypes
 from collections import deque
 
 import cv2
@@ -10,10 +11,13 @@ import numpy as np
 
 from .config import (
     PROJECT_ROOT,
+    changed_config_paths,
     create_log_path,
     load_config,
+    normalize_topmost_mode,
     resolve_mode_config,
     save_config,
+    topmost_enabled_for_state,
 )
 from .detector import ArrowDetector
 from .hotkeys import GlobalHotkeys
@@ -32,7 +36,12 @@ from .recorder import RoiVideoRecorder
 from .selector import ModeSelector
 from .space_timing import SliderObservation, SliderTracker, SpaceTimingConfig
 from .yolo_dataset import YoloDatasetCollector
-from .yolo_detector import YoloArrowDetector, YoloFrameDetections
+from .yolo_detector import (
+    YoloArrowDetector,
+    YoloFrameDetections,
+    YoloRuntimeSettings,
+    yolo_model_signature,
+)
 
 
 WINDOW_NAME = "Dance Arrow Recognition - Q to quit"
@@ -111,11 +120,6 @@ class PreviewWindow:
             self._source_size = source_size
         self.apply_topmost()
 
-    def toggle_topmost(self) -> bool:
-        self.always_on_top = not self.always_on_top
-        self.apply_topmost()
-        return self.always_on_top
-
     def apply_topmost(self) -> None:
         if not self._created:
             return
@@ -128,6 +132,14 @@ class PreviewWindow:
         except cv2.error:
             # Some OpenCV Windows builds do not expose the TOPMOST property.
             pass
+
+    def minimize(self) -> bool:
+        if not self._created:
+            return False
+        hwnd = ctypes.windll.user32.FindWindowW(None, WINDOW_NAME)
+        if not hwnd:
+            return False
+        return bool(ctypes.windll.user32.ShowWindow(hwnd, 6))  # SW_MINIMIZE
 
 
 class ScreenCapture:
@@ -312,6 +324,8 @@ def draw_status(
     selector: ModeSelector | None = None,
     yolo_enabled: bool = False,
     dataset_split: str = "train",
+    dataset_split_enabled: bool = True,
+    topmost_mode: str = "off",
 ) -> np.ndarray:
     scale = min(max(float(display_scale), 0.2), 1.0)
     display_width = max(1, round(frame.shape[1] * scale))
@@ -340,7 +354,7 @@ def draw_status(
     )
     cv2.putText(
         canvas,
-        "Ctrl+F7 Top | F9 ROI | F10 Start | F11 Stop",
+        "Ctrl+F9 ROI | Ctrl+F10 Start | Ctrl+F11 Stop",
         (12, 52),
         cv2.FONT_HERSHEY_SIMPLEX,
         0.52,
@@ -378,6 +392,8 @@ def draw_status(
             ui_mode,
             yolo_enabled,
             dataset_split,
+            dataset_split_enabled,
+            topmost_mode,
         )
 
     footer = recording_status or message or "Ctrl+= Rhythm shots | Ctrl+F12 ROI video"
@@ -478,11 +494,24 @@ def run_live(
             detector = yolo_detector
     recorder = RoiVideoRecorder(config.get("recording", {}))
     window_config = config.setdefault(
-        "window", {"scale": 0.55, "always_on_top": False}
+        "window", {"scale": 0.55, "topmost_mode": "off"}
     )
     saved_window_config = saved_config.setdefault("window", {})
+    topmost_mode = normalize_topmost_mode(window_config)
+    window_config["topmost_mode"] = topmost_mode
+    window_config.pop("always_on_top", None)
+    save_window_config = False
+    if (
+        saved_window_config.get("topmost_mode") != topmost_mode
+        or "always_on_top" in saved_window_config
+    ):
+        saved_window_config["topmost_mode"] = topmost_mode
+        saved_window_config.pop("always_on_top", None)
+        save_window_config = True
     if "max_fps" not in saved_window_config:
         saved_window_config["max_fps"] = 60
+        save_window_config = True
+    if save_window_config:
         save_config(saved_config)
     window_config.setdefault("max_fps", saved_window_config["max_fps"])
     maximum_fps = max(0.0, float(window_config["max_fps"]))
@@ -505,7 +534,7 @@ def run_live(
     selector = ModeSelector()
     preview = PreviewWindow(
         scale=float(window_config.get("scale", 0.55)),
-        always_on_top=bool(window_config.get("always_on_top", False)),
+        always_on_top=topmost_enabled_for_state(topmost_mode, "STOPPED"),
         mouse_callback=selector.on_mouse,
     )
     hotkeys = GlobalHotkeys(config["hotkeys"])
@@ -614,9 +643,252 @@ def run_live(
                 )
             previous_frame_started_at = frame_started_at
             for selection in selector.poll():
-                if selection.kind == "dataset_split":
+                if selection.kind == "config_reload":
                     if state != "STOPPED":
-                        status_message = "Stop recognition before switching TRAIN/VAL"
+                        status_message = "Stop recognition before reloading JSON"
+                        continue
+                    next_capture = None
+                    next_profile_runtime = None
+                    try:
+                        next_saved_config = load_config()
+                        next_config = resolve_mode_config(
+                            next_saved_config,
+                            config["game_mode"],
+                            config["ui_mode"],
+                        )
+                        normalized_window = next_config.setdefault("window", {})
+                        next_topmost_mode = normalize_topmost_mode(
+                            normalized_window
+                        )
+                        normalized_window["topmost_mode"] = next_topmost_mode
+                        normalized_window.pop("always_on_top", None)
+                        changed_paths = changed_config_paths(config, next_config)
+                        if not changed_paths:
+                            status_message = "JSON parameters unchanged"
+                            continue
+
+                        changed_roots = {
+                            path.split(".", 1)[0] for path in changed_paths
+                        }
+                        rebuild_profile = bool(
+                            changed_roots
+                            & {"implemented", "templates", "recognition", "space"}
+                        )
+                        if rebuild_profile:
+                            next_profile_runtime = build_profile_runtime(next_config)
+                        else:
+                            next_profile_runtime = (
+                                opencv_detector,
+                                stable_required,
+                                space_timing,
+                                space_tracker,
+                                space_sender,
+                            )
+
+                        rebuild_input = "input" in changed_roots
+                        next_input_config = next_config["input"]
+                        next_input_enabled = bool(
+                            next_input_config.get("enabled", True)
+                        )
+                        if rebuild_input:
+                            next_input_timing = InputTiming.from_config(
+                                next_input_config
+                            )
+                            next_key_sender = DirectionKeySender(next_input_timing)
+                        else:
+                            next_input_timing = input_timing
+                            next_key_sender = key_sender
+
+                        next_yolo_detector = yolo_detector
+                        next_yolo_values = next_config.get("yolo", {})
+                        next_yolo_enabled = bool(
+                            next_yolo_values.get("enabled", False)
+                        )
+                        next_yolo_runtime = YoloRuntimeSettings.from_config(
+                            next_yolo_values
+                        )
+                        next_yolo_signature = yolo_model_signature(next_yolo_values)
+                        current_yolo_signature = (
+                            (
+                                yolo_detector.model_path,
+                                yolo_detector.device,
+                                yolo_detector.quantize,
+                            )
+                            if yolo_detector is not None
+                            else None
+                        )
+                        rebuild_yolo = (
+                            next_yolo_enabled and next_yolo_detector is None
+                        ) or (
+                            "yolo" in changed_roots
+                            and next_yolo_signature != current_yolo_signature
+                        )
+                        if rebuild_yolo:
+                            next_yolo_detector = YoloArrowDetector(
+                                next_yolo_values
+                            )
+                            next_yolo_detector.warmup()
+
+                        rebuild_hotkeys = "hotkeys" in changed_roots
+                        next_hotkeys = (
+                            GlobalHotkeys(next_config["hotkeys"])
+                            if rebuild_hotkeys
+                            else hotkeys
+                        )
+
+                        rebuild_capture = "monitor" in changed_roots
+                        next_capture = (
+                            ScreenCapture(int(next_config.get("monitor", 1)))
+                            if rebuild_capture
+                            else capture
+                        )
+                        next_region = relative_roi_to_region(
+                            next_capture.width,
+                            next_capture.height,
+                            next_config["arrow_roi"],
+                        )
+
+                        rebuild_recorder = "recording" in changed_roots
+                        if rebuild_recorder and recorder.active:
+                            raise RuntimeError(
+                                "请先用 Ctrl+F12 停止 ROI 录像，再刷新参数"
+                            )
+                        next_recorder = (
+                            RoiVideoRecorder(next_config.get("recording", {}))
+                            if rebuild_recorder
+                            else recorder
+                        )
+                        next_rhythm_collector = rhythm_capture_collector
+                        if rhythm_capture_enabled and "dataset" in changed_roots:
+                            next_rhythm_collector = YoloDatasetCollector(
+                                next_config.get("dataset", {})
+                            )
+                        next_rhythm_capture_interval = max(
+                            0.1,
+                            float(
+                                next_config.get("dataset", {}).get(
+                                    "rhythm_capture_interval_seconds", 0.2
+                                )
+                            ),
+                        )
+                        next_window_config = next_config.get("window", {})
+                        next_maximum_fps = max(
+                            0.0, float(next_window_config.get("max_fps", 60))
+                        )
+                        next_preview_scale = min(
+                            max(float(next_window_config.get("scale", 0.55)), 0.2),
+                            1.0,
+                        )
+                    except Exception as error:
+                        if (
+                            next_capture is not None
+                            and next_capture is not capture
+                        ):
+                            next_capture.close()
+                        if next_profile_runtime is not None:
+                            candidate_space_sender = next_profile_runtime[4]
+                            if (
+                                candidate_space_sender is not None
+                                and candidate_space_sender is not space_sender
+                            ):
+                                candidate_space_sender.close()
+                        status_message = f"JSON reload failed: {error}"
+                        LOGGER.exception("config_reload_failed")
+                        continue
+
+                    if rebuild_input:
+                        key_sender.close()
+                        key_sender = next_key_sender
+                        input_timing = next_input_timing
+                        input_config = next_input_config
+                        input_enabled = next_input_enabled
+                    if rebuild_profile:
+                        if space_sender is not None:
+                            space_sender.close()
+                        (
+                            opencv_detector,
+                            stable_required,
+                            space_timing,
+                            space_tracker,
+                            space_sender,
+                        ) = next_profile_runtime
+                    if rebuild_hotkeys:
+                        hotkeys.close()
+                        next_hotkeys.start()
+                        hotkeys = next_hotkeys
+                    if rebuild_capture:
+                        capture.close()
+                        capture = next_capture
+                    if rebuild_recorder:
+                        recorder = next_recorder
+
+                    saved_config = next_saved_config
+                    config = next_config
+                    yolo_detector = next_yolo_detector
+                    yolo_enabled = next_yolo_enabled
+                    if yolo_detector is not None and not rebuild_yolo:
+                        yolo_detector.apply_runtime_settings(next_yolo_runtime)
+                    detector = yolo_detector if yolo_enabled else opencv_detector
+                    region = next_region
+                    rhythm_capture_collector = next_rhythm_collector
+                    rhythm_capture_interval = next_rhythm_capture_interval
+                    window_config = config.setdefault("window", {})
+                    topmost_mode = next_topmost_mode
+                    maximum_fps = next_maximum_fps
+                    preview.scale = next_preview_scale
+                    preview.always_on_top = topmost_enabled_for_state(
+                        topmost_mode, state
+                    )
+                    preview.apply_topmost()
+                    history = deque(maxlen=stable_required)
+                    stable_sequence = ()
+                    last_observed_sequence = ()
+                    last_sent_sequence = ()
+                    last_input_completed_at = None
+                    last_frame = None
+                    target_hwnd = 0
+                    target_title = ""
+                    reset_round()
+                    cancel_space_cycle(clear_target=True)
+                    changed_summary = ", ".join(sorted(changed_roots))
+                    status_message = f"JSON reloaded: {changed_summary}"
+                    LOGGER.info(
+                        "config_reloaded paths=%s",
+                        sorted(changed_paths),
+                    )
+                    continue
+                if selection.kind == "topmost_mode":
+                    previous_topmost_mode = topmost_mode
+                    topmost_mode = str(selection.value)
+                    saved_window = saved_config.setdefault("window", {})
+                    saved_window["topmost_mode"] = topmost_mode
+                    saved_window.pop("always_on_top", None)
+                    active_window = config.setdefault("window", {})
+                    active_window["topmost_mode"] = topmost_mode
+                    active_window.pop("always_on_top", None)
+                    preview.always_on_top = topmost_enabled_for_state(
+                        topmost_mode, state
+                    )
+                    preview.apply_topmost()
+                    try:
+                        save_config(saved_config)
+                    except OSError as error:
+                        topmost_mode = previous_topmost_mode
+                        saved_window["topmost_mode"] = topmost_mode
+                        active_window["topmost_mode"] = topmost_mode
+                        preview.always_on_top = topmost_enabled_for_state(
+                            topmost_mode, state
+                        )
+                        preview.apply_topmost()
+                        status_message = f"Topmost mode save failed: {error}"
+                        LOGGER.exception("topmost_mode_save_failed")
+                    else:
+                        status_message = f"Topmost mode: {topmost_mode.upper()}"
+                        LOGGER.info("topmost_mode_changed mode=%s", topmost_mode)
+                    continue
+                if selection.kind == "dataset_split":
+                    if rhythm_capture_enabled:
+                        status_message = "Stop rhythm screenshots before switching TRAIN/VAL"
                         continue
                     next_split = "val" if selection.value == "val" else "train"
                     dataset_settings = saved_config.setdefault("dataset", {})
@@ -624,18 +896,13 @@ def run_live(
                     dataset_settings["split"] = next_split
                     config.setdefault("dataset", {})["split"] = next_split
                     try:
-                        next_rhythm_collector = rhythm_capture_collector
-                        if rhythm_capture_enabled:
-                            capture_settings = dict(dataset_settings)
-                            next_rhythm_collector = YoloDatasetCollector(capture_settings)
-                    except (OSError, ValueError) as error:
+                        save_config(saved_config)
+                    except OSError as error:
                         dataset_settings["split"] = previous_split
                         config["dataset"]["split"] = previous_split
                         status_message = f"Dataset split failed: {error}"
                         LOGGER.exception("dataset_split_failed")
                     else:
-                        rhythm_capture_collector = next_rhythm_collector
-                        save_config(saved_config)
                         status_message = f"Dataset split: {next_split.upper()}"
                         LOGGER.info("dataset_split_changed split=%s", next_split)
                     continue
@@ -684,7 +951,11 @@ def run_live(
                     if selection.value == "yolo":
                         status_message = "Stop recognition before switching YOLO"
                     elif selection.value == "dataset_split":
-                        status_message = "Stop recognition before switching TRAIN/VAL"
+                        status_message = (
+                            "Stop rhythm screenshots before switching TRAIN/VAL"
+                        )
+                    elif selection.value == "config_reload":
+                        status_message = "Stop recognition before reloading JSON"
                     else:
                         status_message = "Stop recognition before switching mode"
                     continue
@@ -751,12 +1022,7 @@ def run_live(
                 )
 
             for event, message in hotkeys.poll():
-                if event == "toggle_topmost":
-                    enabled = preview.toggle_topmost()
-                    saved_config.setdefault("window", {})["always_on_top"] = enabled
-                    save_config(saved_config)
-                    status_message = f"TOPMOST {'ON' if enabled else 'OFF'}"
-                elif event == "select_roi":
+                if event == "select_roi":
                     was_running = state == "RUNNING"
                     state = "STOPPED"
                     key_sender.cancel()
@@ -796,6 +1062,7 @@ def run_live(
                         last_observed_sequence = ()
                         reset_round()
                 elif event == "stop":
+                    was_running = state == "RUNNING"
                     state = "STOPPED"
                     key_sender.cancel()
                     cancel_space_cycle()
@@ -805,6 +1072,8 @@ def run_live(
                     target_hwnd = 0
                     target_title = ""
                     reset_round()
+                    if was_running:
+                        preview.minimize()
                 elif event == "record_roi":
                     if recorder.active:
                         saved_path = recorder.stop()
@@ -1256,6 +1525,9 @@ def run_live(
                     f"{rhythm_capture_collector.saved_count}"
                 )
             recording_status = " | ".join(activity_status) or None
+            preview.always_on_top = topmost_enabled_for_state(
+                topmost_mode, state
+            )
             display = draw_status(
                 annotated,
                 state,
@@ -1274,6 +1546,8 @@ def run_live(
                 selector,
                 yolo_enabled,
                 str(config.get("dataset", {}).get("split", "train")),
+                not rhythm_capture_enabled,
+                topmost_mode,
             )
             preview.show(display)
             key = cv2.waitKey(1) & 0xFF

@@ -11,7 +11,14 @@ import cv2
 import numpy as np
 
 from dance_tool import config as config_module
-from dance_tool.config import PROJECT_ROOT, load_config, resolve_mode_config
+from dance_tool.config import (
+    PROJECT_ROOT,
+    changed_config_paths,
+    load_config,
+    normalize_topmost_mode,
+    resolve_mode_config,
+    topmost_enabled_for_state,
+)
 from dance_tool.detector import ArrowDetector, detection_preview_label
 from dance_tool.hotkeys import parse_hotkey
 from dance_tool.image_io import read_image
@@ -49,6 +56,7 @@ from dance_tool.yolo_dataset import (
 )
 from dance_tool.yolo_detector import (
     YoloObjectDetection,
+    YoloRuntimeSettings,
     yolo_rows_to_detections,
     yolo_rows_to_frame_detections,
 )
@@ -425,7 +433,7 @@ class ArrowDetectorTests(unittest.TestCase):
             summary = validate_dataset(root)
             self.assertEqual(1, summary["train"].images)
             self.assertEqual(1, summary["val"].boxes)
-            with self.assertRaisesRegex(ValueError, "必须分别覆盖全部10类"):
+            with self.assertRaisesRegex(ValueError, "必须分别覆盖8类箭头和slider"):
                 validate_class_coverage(summary)
             yaml_path = write_training_yaml(root)
             yaml_text = yaml_path.read_text(encoding="utf-8")
@@ -464,6 +472,43 @@ class ArrowDetectorTests(unittest.TestCase):
             train_paths = set(train_list.read_text(encoding="utf-8").splitlines())
             val_paths = set(val_list.read_text(encoding="utf-8").splitlines())
             self.assertFalse(train_paths & val_paths)
+
+    def test_rhythm_bar_is_optional_for_training_and_auto_split(self) -> None:
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "classes.txt").write_text(
+                "\n".join(CLASS_NAMES) + "\n", encoding="utf-8"
+            )
+            image_dir = root / "images" / "train"
+            label_dir = root / "labels" / "train"
+            image_dir.mkdir(parents=True)
+            label_dir.mkdir(parents=True)
+            required_classes = tuple(range(8)) + (9,)
+            labels = "\n".join(
+                f"{class_id} 0.5 0.5 0.1 0.1" for class_id in required_classes
+            )
+            for index in range(10):
+                cv2.imwrite(
+                    str(image_dir / f"sample_{index:02d}.png"),
+                    np.zeros((32, 64, 3), dtype=np.uint8),
+                )
+                (label_dir / f"sample_{index:02d}.txt").write_text(
+                    labels + "\n", encoding="utf-8"
+                )
+
+            train_list, val_list, train_count, val_count = create_auto_validation_split(
+                root, val_ratio=0.2, seed=42
+            )
+            self.assertEqual((8, 2), (train_count, val_count))
+            summary = validate_dataset(
+                root,
+                splits=("train",),
+            )
+            validate_class_coverage(summary)
+            self.assertEqual(0, summary["train"].class_counts[8])
+            self.assertEqual(10, summary["train"].class_counts[9])
+            self.assertTrue(train_list.exists())
+            self.assertTrue(val_list.exists())
 
     def test_class_distribution_lists_train_and_val_counts(self) -> None:
         with TemporaryDirectory() as directory:
@@ -666,7 +711,126 @@ class ArrowDetectorTests(unittest.TestCase):
         self.assertEqual("blocked", blocked.kind)
         self.assertEqual("yolo", blocked.value)
 
-    def test_dataset_split_toggle_is_mouse_only_and_blocked_while_running(self) -> None:
+    def test_config_reload_is_right_of_yolo_and_only_enabled_when_stopped(self) -> None:
+        selector = ModeSelector()
+        canvas = np.zeros((243, 700, 3), dtype=np.uint8)
+        selector.draw(canvas, "STOPPED", "traditional_four_key", "classic")
+        yolo = next(
+            button for button in selector.buttons if button.kind == "yolo_toggle"
+        )
+        reload_button = next(
+            button for button in selector.buttons if button.kind == "config_reload"
+        )
+        self.assertGreater(reload_button.left, yolo.right)
+        selector.on_mouse(
+            cv2.EVENT_LBUTTONUP,
+            (reload_button.left + reload_button.right) // 2,
+            (reload_button.top + reload_button.bottom) // 2,
+            0,
+            None,
+        )
+        self.assertEqual("config_reload", selector.poll()[0].kind)
+
+        selector.draw(canvas, "RUNNING", "traditional_four_key", "classic")
+        reload_button = next(
+            button for button in selector.buttons if button.kind == "config_reload"
+        )
+        selector.on_mouse(
+            cv2.EVENT_LBUTTONUP,
+            (reload_button.left + reload_button.right) // 2,
+            (reload_button.top + reload_button.bottom) // 2,
+            0,
+            None,
+        )
+        blocked = selector.poll()[0]
+        self.assertEqual("blocked", blocked.kind)
+        self.assertEqual("config_reload", blocked.value)
+
+    def test_topmost_button_cycles_all_modes_even_while_running(self) -> None:
+        selector = ModeSelector()
+        canvas = np.zeros((243, 700, 3), dtype=np.uint8)
+        expected = (
+            ("off", "always"),
+            ("always", "running"),
+            ("running", "off"),
+        )
+        for current, next_mode in expected:
+            selector.draw(
+                canvas,
+                "RUNNING",
+                "traditional_four_key",
+                "classic",
+                topmost_mode=current,
+            )
+            topmost = next(
+                button for button in selector.buttons if button.kind == "topmost_mode"
+            )
+            self.assertEqual(8, topmost.top)
+            self.assertEqual(canvas.shape[1] - 10, topmost.right)
+            selector.on_mouse(
+                cv2.EVENT_LBUTTONUP,
+                (topmost.left + topmost.right) // 2,
+                (topmost.top + topmost.bottom) // 2,
+                0,
+                None,
+            )
+            event = selector.poll()[0]
+            self.assertEqual("topmost_mode", event.kind)
+            self.assertEqual(next_mode, event.value)
+
+    def test_topmost_mode_supports_legacy_boolean_and_running_state(self) -> None:
+        self.assertEqual("always", normalize_topmost_mode({"always_on_top": True}))
+        self.assertEqual("off", normalize_topmost_mode({"always_on_top": False}))
+        self.assertFalse(topmost_enabled_for_state("running", "STOPPED"))
+        self.assertTrue(topmost_enabled_for_state("running", "RUNNING"))
+        self.assertTrue(topmost_enabled_for_state("always", "STOPPED"))
+        self.assertFalse(topmost_enabled_for_state("off", "RUNNING"))
+        with self.assertRaisesRegex(ValueError, "topmost_mode"):
+            normalize_topmost_mode({"topmost_mode": "sometimes"})
+
+    def test_topmost_hotkey_is_removed_from_config(self) -> None:
+        self.assertNotIn("toggle_topmost", self.saved_config["hotkeys"])
+        self.assertIn(
+            self.saved_config["window"]["topmost_mode"],
+            {"off", "always", "running"},
+        )
+
+    def test_changed_config_paths_reports_only_modified_json_values(self) -> None:
+        previous = {
+            "window": {"max_fps": 60, "scale": 0.5},
+            "space": {"cursor_window_ratio": 0.6},
+        }
+        current = {
+            "window": {"max_fps": 90, "scale": 0.5},
+            "space": {"cursor_window_ratio": 0.62},
+            "dataset": {"split": "train"},
+        }
+        self.assertEqual(
+            {
+                "window.max_fps",
+                "space.cursor_window_ratio",
+                "dataset",
+            },
+            changed_config_paths(previous, current),
+        )
+
+    def test_yolo_runtime_settings_can_update_without_reloading_model(self) -> None:
+        settings = YoloRuntimeSettings.from_config(
+            {
+                "confidence": 0.61,
+                "slider_confidence": 0.27,
+                "iou": 0.4,
+                "image_size": 704,
+                "max_detections": 20,
+            }
+        )
+        self.assertEqual(0.61, settings.confidence)
+        self.assertEqual(0.27, settings.slider_confidence)
+        self.assertEqual(0.4, settings.iou)
+        self.assertEqual(704, settings.image_size)
+        self.assertEqual(20, settings.max_detections)
+
+    def test_dataset_split_toggle_is_allowed_while_running_but_not_capturing(self) -> None:
         selector = ModeSelector()
         canvas = np.zeros((243, 700, 3), dtype=np.uint8)
         selector.draw(
@@ -696,6 +860,28 @@ class ArrowDetectorTests(unittest.TestCase):
             "traditional_four_key",
             "classic",
             dataset_split="val",
+        )
+        split = next(
+            button for button in selector.buttons if button.kind == "dataset_split"
+        )
+        selector.on_mouse(
+            cv2.EVENT_LBUTTONUP,
+            (split.left + split.right) // 2,
+            (split.top + split.bottom) // 2,
+            0,
+            None,
+        )
+        event = selector.poll()[0]
+        self.assertEqual("dataset_split", event.kind)
+        self.assertEqual("train", event.value)
+
+        selector.draw(
+            canvas,
+            "RUNNING",
+            "traditional_four_key",
+            "classic",
+            dataset_split="val",
+            dataset_split_enabled=False,
         )
         split = next(
             button for button in selector.buttons if button.kind == "dataset_split"
