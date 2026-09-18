@@ -5,7 +5,7 @@ import time
 import random
 from pathlib import Path
 from tempfile import TemporaryDirectory
-from unittest.mock import patch
+from unittest.mock import call, patch
 
 import cv2
 import numpy as np
@@ -31,6 +31,7 @@ from dance_tool.keyboard_input import (
     is_admin,
 )
 from dance_tool.live import (
+    PreviewWindow,
     automatic_window_roi,
     draw_status,
     frame_limit_delay,
@@ -153,6 +154,8 @@ class ArrowDetectorTests(unittest.TestCase):
     def test_mode_profiles_can_be_switched_without_changing_saved_mode(self) -> None:
         classic = resolve_mode_config(self.saved_config, "传统四键", "经典")
         renewed = resolve_mode_config(self.saved_config, "传统四键", "焕新")
+        couple_classic = resolve_mode_config(self.saved_config, "双人舞蹈", "经典")
+        couple_renewed = resolve_mode_config(self.saved_config, "双人舞蹈", "焕新")
         speed_dance = resolve_mode_config(self.saved_config, "飞车舞蹈", "经典")
         self.assertEqual("traditional_four_key", classic["game_mode"])
         self.assertEqual("classic", classic["ui_mode"])
@@ -161,6 +164,26 @@ class ArrowDetectorTests(unittest.TestCase):
         self.assertEqual(0.42, renewed["recognition"]["match_threshold"])
         self.assertIn("classic", classic["space"]["slider_templates"][0])
         self.assertIn("renewed", renewed["space"]["slider_templates"][0])
+        self.assertTrue(couple_classic["implemented"])
+        self.assertTrue(couple_renewed["implemented"])
+        self.assertEqual(classic["templates"], couple_classic["templates"])
+        self.assertEqual(renewed["templates"], couple_renewed["templates"])
+        self.assertEqual(
+            classic["space"]["slider_templates"],
+            couple_classic["space"]["slider_templates"],
+        )
+        self.assertEqual(
+            renewed["space"]["slider_templates"],
+            couple_renewed["space"]["slider_templates"],
+        )
+        self.assertLess(
+            couple_classic["space"]["cursor_window_ratio"],
+            classic["space"]["cursor_window_ratio"],
+        )
+        self.assertLess(
+            couple_renewed["space"]["cursor_window_ratio"],
+            renewed["space"]["cursor_window_ratio"],
+        )
         self.assertFalse(speed_dance["implemented"])
         self.assertEqual("traditional_four_key", self.saved_config["game_mode"])
         self.assertEqual("classic", self.saved_config["ui_mode"])
@@ -173,6 +196,16 @@ class ArrowDetectorTests(unittest.TestCase):
                     self.assertEqual(game_mode, profile["game_mode"])
                     self.assertEqual(ui_mode, profile["ui_mode"])
                     self.assertIn("implemented", profile)
+
+    def test_cursor_window_ratio_is_owned_by_implemented_mode_profiles(self) -> None:
+        self.assertNotIn("cursor_window_ratio", self.saved_config["space"])
+        for game_mode in ("traditional_four_key", "couple_dance"):
+            for ui_mode in ("classic", "renewed"):
+                with self.subTest(game_mode=game_mode, ui_mode=ui_mode):
+                    profile = resolve_mode_config(
+                        self.saved_config, game_mode, ui_mode
+                    )
+                    self.assertIn("cursor_window_ratio", profile["space"])
 
     def test_roi_recorder_writes_fixed_timeline(self) -> None:
         with TemporaryDirectory() as directory:
@@ -614,6 +647,33 @@ class ArrowDetectorTests(unittest.TestCase):
         )
         self.assertEqual(round(image.shape[0] * 0.5) + 243, result.shape[0])
         self.assertEqual(round(image.shape[1] * 0.5), result.shape[1])
+
+    def test_preview_applies_topmost_only_when_state_changes(self) -> None:
+        preview = PreviewWindow(0.5, True)
+        preview._created = True
+        with patch("dance_tool.live.set_preview_topmost", return_value=True) as setter:
+            preview.apply_topmost()
+            preview.apply_topmost()
+            preview.always_on_top = False
+            preview.apply_topmost()
+        self.assertEqual(
+            [call(True), call(False)],
+            setter.call_args_list,
+        )
+
+    def test_preview_restores_without_activation_before_forcing_topmost(self) -> None:
+        preview = PreviewWindow(0.5, True)
+        preview._created = True
+        with (
+            patch(
+                "dance_tool.live.show_preview_without_activation",
+                return_value=True,
+            ) as restore,
+            patch.object(preview, "apply_topmost") as apply_topmost,
+        ):
+            self.assertTrue(preview.restore_without_activation())
+        restore.assert_called_once_with()
+        apply_topmost.assert_called_once_with(force=True)
 
     def test_mode_selector_only_accepts_clicks_while_stopped(self) -> None:
         selector = ModeSelector()

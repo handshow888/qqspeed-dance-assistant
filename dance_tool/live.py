@@ -46,6 +46,51 @@ from .yolo_detector import (
 
 WINDOW_NAME = "Dance Arrow Recognition - Q to quit"
 LOGGER = logging.getLogger("dance_tool.runtime")
+SW_SHOWNOACTIVATE = 4
+SW_MINIMIZE = 6
+SWP_NOSIZE = 0x0001
+SWP_NOMOVE = 0x0002
+SWP_NOACTIVATE = 0x0010
+HWND_TOPMOST = -1
+HWND_NOTOPMOST = -2
+
+
+def find_preview_window() -> int:
+    return int(ctypes.windll.user32.FindWindowW(None, WINDOW_NAME) or 0)
+
+
+def show_preview_without_activation() -> bool:
+    hwnd = find_preview_window()
+    if not hwnd:
+        return False
+    ctypes.windll.user32.ShowWindow(hwnd, SW_SHOWNOACTIVATE)
+    return True
+
+
+def minimize_preview_window() -> bool:
+    hwnd = find_preview_window()
+    if not hwnd:
+        return False
+    ctypes.windll.user32.ShowWindow(hwnd, SW_MINIMIZE)
+    return True
+
+
+def set_preview_topmost(enabled: bool) -> bool:
+    hwnd = find_preview_window()
+    if not hwnd:
+        return False
+    insert_after = ctypes.c_void_p(HWND_TOPMOST if enabled else HWND_NOTOPMOST)
+    return bool(
+        ctypes.windll.user32.SetWindowPos(
+            hwnd,
+            insert_after,
+            0,
+            0,
+            0,
+            0,
+            SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
+        )
+    )
 
 
 def space_expire_reason(
@@ -102,6 +147,7 @@ class PreviewWindow:
         self.always_on_top = bool(always_on_top)
         self._created = False
         self._source_size: tuple[int, int] | None = None
+        self._applied_topmost: bool | None = None
         self.mouse_callback = mouse_callback
 
     def show(self, image: np.ndarray) -> None:
@@ -120,26 +166,25 @@ class PreviewWindow:
             self._source_size = source_size
         self.apply_topmost()
 
-    def apply_topmost(self) -> None:
+    def apply_topmost(self, *, force: bool = False) -> None:
         if not self._created:
             return
-        try:
-            cv2.setWindowProperty(
-                WINDOW_NAME,
-                cv2.WND_PROP_TOPMOST,
-                1.0 if self.always_on_top else 0.0,
-            )
-        except cv2.error:
-            # Some OpenCV Windows builds do not expose the TOPMOST property.
-            pass
+        if not force and self._applied_topmost == self.always_on_top:
+            return
+        if set_preview_topmost(self.always_on_top):
+            self._applied_topmost = self.always_on_top
 
     def minimize(self) -> bool:
         if not self._created:
             return False
-        hwnd = ctypes.windll.user32.FindWindowW(None, WINDOW_NAME)
-        if not hwnd:
+        return minimize_preview_window()
+
+    def restore_without_activation(self) -> bool:
+        if not self._created:
             return False
-        return bool(ctypes.windll.user32.ShowWindow(hwnd, 6))  # SW_MINIMIZE
+        restored = show_preview_without_activation()
+        self.apply_topmost(force=True)
+        return restored
 
 
 class ScreenCapture:
@@ -1057,6 +1102,10 @@ def run_live(
                     cancel_space_cycle(clear_target=True)
                     if bind_foreground_target():
                         state = "RUNNING"
+                        preview.always_on_top = topmost_enabled_for_state(
+                            topmost_mode, state
+                        )
+                        preview.restore_without_activation()
                         history.clear()
                         stable_sequence = ()
                         last_observed_sequence = ()

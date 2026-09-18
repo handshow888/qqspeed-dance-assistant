@@ -1,5 +1,21 @@
 {
   "name": "双人舞蹈 · 经典",
-  "implemented": false,
-  "unavailable_reason": "双人舞蹈（经典）的识别素材和规则尚未配置"
+  "implemented": true,
+  "templates": {
+    "UP": ["assets/traditional_four_key/classic/templates/上箭头-未按下.png", "assets/traditional_four_key/classic/templates/上箭头-已按下.png"],
+    "DOWN": ["assets/traditional_four_key/classic/templates/下箭头-未按下.png", "assets/traditional_four_key/classic/templates/下箭头-已按下.png"],
+    "LEFT": ["assets/traditional_four_key/classic/templates/左箭头-未按下.png", "assets/traditional_four_key/classic/templates/左箭头-已按下.png"],
+    "RIGHT": ["assets/traditional_four_key/classic/templates/右箭头-未按下.png", "assets/traditional_four_key/classic/templates/右箭头-已按下.png"]
+  },
+  "recognition": {
+    "match_threshold": 0.31,
+    "scales": [1.0],
+    "nms_iou_threshold": 0.25,
+    "stable_frames": 2
+  },
+  "space": {
+    "slider_templates": ["assets/traditional_four_key/classic/templates/节奏条滑块.png"],
+    "slider_match_threshold": 0.62,
+    "cursor_window_ratio": 0.6
+  }
 }
